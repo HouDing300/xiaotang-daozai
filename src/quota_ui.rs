@@ -11,7 +11,7 @@ pub(crate) struct State {
     pub provider:Provider,pub alias:String,pub source:String,pub note:String,
     pub connect_open:bool,pub connect_target:Option<String>,
     pub login:Option<quota::grok::Login>,
-    pub workbuddy_connecting:Option<quota::workbuddy::Connect>,
+    pub workbuddy_connecting:Option<quota::workbuddy::Connect>,pub workbuddy_cookie:String,
     pub deepseek_connecting:Option<quota::deepseek::Connect>,pub deepseek_key:String,
     pub stale:HashMap<String,String>,
     pub gemini_connecting:Option<quota::gemini::Connect>,pub gemini_email:String,pub gemini_cookie:String,
@@ -177,6 +177,7 @@ impl App {
         if let Some(result)=self.quota.workbuddy_connecting.as_ref().and_then(|c|c.poll()){
             self.quota.workbuddy_connecting=None;
             match result{Ok(connected)=>{
+                self.quota.workbuddy_cookie.clear(); // 连接成功后不再把明文 Cookie 留在输入框里
                 let id=self.quota.config.connect_workbuddy(connected.slot,connected.label);self.quota.stale.remove(&id);self.quota.rows.insert(id,Ok(connected.snapshot));self.quota.save_snapshots();self.quota.connect_target=None;self.quota.config.save();self.quota.note="WorkBuddy 已连接".into();self.pending.push(Cmd::QuotaConnected);
             },Err(error)=>self.quota.note=error}
         }
@@ -422,7 +423,16 @@ impl App {
                         let expected=self.quota.connect_target.as_ref().and_then(|id|self.quota.config.accounts.iter().find(|a|&a.id==id)).and_then(|a|a.slot.clone());self.quota.note.clear();self.quota.workbuddy_connecting=Some(quota::workbuddy::Connect::start(self.quota.alias.clone(),expected));
                     }
                 });
-                ui.label(egui::RichText::new("首次连接时打开已登录的官网用量页。连接成功后可关闭浏览器。").size(12.0).color(ui.visuals().weak_text_color()));
+                ui.label(egui::RichText::new("「连接当前浏览器」需要本机浏览器连接服务；没有扩展时请用下方 Cookie 方式。连接成功后可关闭浏览器。").size(12.0).color(ui.visuals().weak_text_color()));
+                ui.collapsing("使用 Cookie 连接（无需浏览器扩展）",|ui|{
+                    ui.label("在已登录的官网用量页按 F12 → 网络 → 刷新，任选一个官网请求，复制 Cookie 请求头。Cookie 只加密保存在本机。");
+                    ui.add_sized([ui.available_width(),27.0],egui::TextEdit::singleline(&mut self.quota.workbuddy_cookie).vertical_align(egui::Align::Center).password(true).hint_text("粘贴 Cookie 请求头"));
+                    if ui.add_enabled(self.quota.workbuddy_connecting.is_none()&&!self.quota.workbuddy_cookie.trim().is_empty(),egui::Button::new("验证并连接")).clicked(){
+                        let expected=self.quota.connect_target.as_ref().and_then(|id|self.quota.config.accounts.iter().find(|a|&a.id==id)).and_then(|a|a.slot.clone());
+                        self.quota.note.clear();
+                        self.quota.workbuddy_connecting=Some(quota::workbuddy::Connect::start_with_cookie(self.quota.alias.clone(),self.quota.workbuddy_cookie.clone(),expected));
+                    }
+                });
                 if self.quota.workbuddy_connecting.is_some(){ui.spinner();ui.label("正在验证积分…");ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));}
             }else if self.quota.provider==Provider::DeepSeek{
                 ui.label("查询 API 账户余额，密钥仅保存在本机。");
@@ -432,7 +442,7 @@ impl App {
             }else if self.quota.provider==Provider::Gemini{
                 ui.label(egui::RichText::new("读取 Gemini 网页的 5 小时与每周额度。").size(12.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(180),Color32::from_gray(75))));
                 ui.horizontal(|ui|{if ui.button("打开 Gemini 用量").clicked(){self.pending.push(Cmd::OpenUrl("https://gemini.google.com/usage".into()));}if ui.add_enabled(self.quota.gemini_connecting.is_none(),egui::Button::new("连接当前浏览器")).clicked(){self.quota.gemini_connecting=Some(quota::gemini::Connect::start(self.quota.alias.clone(),self.quota.gemini_email.clone(),None,self.quota.connect_target.as_ref().and_then(|id|self.quota.config.accounts.iter().find(|a|&a.id==id)).and_then(|a|a.slot.clone())));}});
-                ui.label(egui::RichText::new("浏览器连接需要 Kimi 浏览器扩展；连接后可独立刷新。").size(12.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(180),Color32::from_gray(75))));
+                ui.label(egui::RichText::new("「连接当前浏览器」需要本机浏览器连接服务；没有扩展时可用下方 Cookie 连接。").size(12.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(180),Color32::from_gray(75))));
                 settings_control_row(ui,"Google 邮箱",80.0,|ui|{ui.add_sized([ui.available_width(),27.0],egui::TextEdit::singleline(&mut self.quota.gemini_email).vertical_align(egui::Align::Center).hint_text("多账号时填写要连接的邮箱"))});
                 ui.collapsing("使用 Cookie 连接",|ui|{
                     ui.label("在 Gemini 用量页按 F12，打开网络，刷新后找到 executeQuery 请求，复制 Cookie 请求头。");

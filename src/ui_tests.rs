@@ -5303,3 +5303,38 @@ fn shelf_menu_last_action_fits_inside_window_and_works(){
     h.click(label.center());
     assert!(h.app.shelf.items.is_empty());
 }
+
+#[test]
+fn custom_timers_fire_once_and_snooze_delays_the_next_alert(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    let now=chrono::Local::now().timestamp();
+    h.app.timers.items.push(crate::timers::TimerItem{
+        id:"stand".into(),title:"站立提醒".into(),body:"起来走动一下".into(),enabled:true,
+        mode:crate::timers::TimerMode::Interval{minutes:45},
+        start_hour:0,end_hour:0,last_fired:now-45*60-1,fired_on:String::new(),snooze_until:0,
+    });
+    let env=Env{clock:"09:41:00".into(),today:"2026-10-28".into(),..Default::default()};
+    h.app.tick_timers(&env);
+    assert!(h.app.pending.iter().any(|c|matches!(c,crate::app::Cmd::Notify(t,_) if t.as_str()=="站立提醒")));
+    assert!(h.app.timers.items[0].last_fired>=now,"触发后应重置计时基准");
+    h.app.pending.clear();
+    h.app.tick_timers(&env);
+    assert!(!h.app.pending.iter().any(|c|matches!(c,crate::app::Cmd::Notify(t,_) if t.as_str()=="站立提醒")),"间隔未到不重复提醒");
+    h.app.snooze_timer("stand");
+    assert!(h.app.timers.items[0].snooze_until>now);
+    h.app.tick_timers(&env);
+    assert!(h.app.pending.is_empty(),"稍后期间不再提醒");
+}
+
+#[test]
+fn timer_notice_keeps_its_id_and_opens_the_timers_tab(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let mut h=H::new();
+    h.app.timer_alert("stand".into(),"站立提醒".into(),"起来走动一下".into());
+    for _ in 0..3 {h.frame(vec![]);}
+    assert_eq!(h.app.notice.as_ref().and_then(|a|a.timer_id.as_deref()),Some("stand"));
+    h.app.open_timers_settings();
+    assert!(h.app.settings_open);
+    assert_eq!(h.app.settings_tab,3,"定时提醒内嵌在「专注与定时 → 饮水」子页");
+}

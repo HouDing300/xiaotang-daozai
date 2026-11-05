@@ -446,6 +446,28 @@ pub fn pick_files_for(title:&str,multiple:bool) -> Result<Vec<std::path::PathBuf
         Ok(out)
     }
 }
+
+/// 选择文件夹（供设置里更改数据目录用）。用户取消返回 `Ok(None)`。
+pub fn pick_folder(title: &str) -> Result<Option<std::path::PathBuf>> {
+    unsafe {
+        use windows::Win32::UI::Shell::*;
+        let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_ALL)?;
+        // 选文件夹时不能带 FOS_FILEMUSTEXIST，否则只会返回文件。
+        dialog.SetOptions(FOS_FORCEFILESYSTEM | FOS_PICKFOLDERS)?;
+        dialog.SetTitle(&HSTRING::from(title))?;
+        if let Err(e) = dialog.Show(None) {
+            if e.code().0 as u32 == 0x800704c7 {
+                return Ok(None);
+            }
+            return Err(e);
+        }
+        let item = dialog.GetResult()?;
+        let ptr = item.GetDisplayName(SIGDN_FILESYSPATH)?;
+        let text = ptr.to_string()?;
+        windows::Win32::System::Com::CoTaskMemFree(Some(ptr.0 as _));
+        Ok(Some(text.into()))
+    }
+}
 /// 构建资源管理器可识别的文件数据对象。
 fn file_data_object(path: &std::path::Path) -> Result<windows::Win32::System::Com::IDataObject> {
     unsafe {

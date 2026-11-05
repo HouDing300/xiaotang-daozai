@@ -18,6 +18,8 @@ pub(crate) struct Alert {
     pub duration: f64,
     pub bluetooth: Option<(crate::bt::DeviceKind, bool)>,
     pub meeting: Option<(crate::mail::Meeting, String)>,
+    /// 自定义定时提醒的 id；Some 时通知卡片显示「稍后 / 定时设置」。
+    pub timer_id: Option<String>,
 }
 impl Alert {
     pub(crate) fn messenger(&self)->Option<crate::app::Messenger>{
@@ -88,6 +90,7 @@ pub(crate) fn messenger_icon(c:&Card,x:f32,y:f32,source:crate::app::Messenger){
     }
 }
 fn notice_icon(c:&Card,x:f32,y:f32,a:&Alert) {
+    if a.timer_id.is_some(){crate::paint::stopwatch(&c.scaled(x,y,0.65),x,y,8.0,0.0,theme::BLUE);return;}
     if a.source!=AlertSource::Internal{crate::paint::bell(c,x,y,theme::WHITE,0.0);return;}
     match a.title.as_str() {
         "系统音量"=>{
@@ -209,14 +212,29 @@ impl App {
             duration: if transient { 2.5 } else { 8.0 },
             bluetooth: None,
             meeting: None,
+            timer_id: None,
         };
         self.enqueue_alert(a, system);
+    }
+    /// 自定义定时提醒走同一条通知链，但带上 id 以便「稍后」和跳到定时设置。
+    pub(crate) fn timer_alert(&mut self, id:String, title:String, body:String) {
+        self.enqueue_alert(Alert {
+            source: AlertSource::Internal,
+            title, body,
+            page: usize::MAX, at: self.t, duration: 8.0,
+            bluetooth: None, meeting: None, timer_id: Some(id),
+        }, true);
+    }
+    /// 定时提醒内嵌在「专注与定时 → 饮水」子页。
+    pub(crate) fn open_timers_settings(&mut self) {
+        self.settings_tab = 3;
+        self.open_settings();
     }
     pub(crate) fn meeting_alert(&mut self, meeting: crate::mail::Meeting, source: String, page: usize) {
         self.enqueue_alert(Alert {
             source: AlertSource::Internal,
             title: "会议提醒".into(), body: format!("{} · {} · {}", meeting.title, meeting.at, source),
-            page, at: self.t, duration: 12.0, bluetooth: None, meeting: Some((meeting, source)),
+            page, at: self.t, duration: 12.0, bluetooth: None, meeting: Some((meeting, source)), timer_id: None,
         }, true);
     }
     pub(crate) fn bluetooth_alert(&mut self, device: &crate::bt::Device, connected: bool) {
@@ -232,6 +250,7 @@ impl App {
             page: 5, at: self.t, duration: 2.5,
             bluetooth: Some((device.kind, connected)),
             meeting: None,
+            timer_id: None,
         };
         self.enqueue_alert(a, false);
     }
@@ -291,7 +310,7 @@ impl App {
         self.mark_messenger(crate::app::Messenger::Wechat,pid,window);
         self.notification_bell_at=self.t;
         self.notification_bell_until=self.t+4.5;
-        self.enqueue_alert(Alert{source:AlertSource::Wechat,title:"微信".into(),body:"有新消息 · 请到微信查看".into(),page:usize::MAX,at:self.t,duration:4.5,bluetooth:None,meeting:None},false);
+        self.enqueue_alert(Alert{source:AlertSource::Wechat,title:"微信".into(),body:"有新消息 · 请到微信查看".into(),page:usize::MAX,at:self.t,duration:4.5,bluetooth:None,meeting:None,timer_id:None},false);
     }
     pub fn receive_notification(&mut self, app:String, id:String, body:String){
         if !self.settings.read_notifications || id.is_empty() || (self.settings.qq_only && id!="QQ"){return;}
@@ -307,7 +326,7 @@ impl App {
             if let Some(code)=crate::otp::extract("",&text,&[]) {text=crate::mail_privacy::mask(&text,&code.text);}
             text
         }else{"收到新通知 · 内容已隐藏".into()};
-        self.enqueue_alert(Alert{source:AlertSource::External(id),title,body,page:usize::MAX,at:self.t,duration:4.5,bluetooth:None,meeting:None},false);
+        self.enqueue_alert(Alert{source:AlertSource::External(id),title,body,page:usize::MAX,at:self.t,duration:4.5,bluetooth:None,meeting:None,timer_id:None},false);
     }
     pub(crate) fn tick_alerts(&mut self) {
         self.pending_messengers.retain(|u|self.settings.notifications && match u.source {
@@ -437,11 +456,15 @@ impl App {
             }
         } else {
             let is_water=a.page==2;let is_focus=a.page==1;let is_power=a.title=="电量偏低";
+            let timer_id=a.timer_id.clone();
             notice_icon(&nc,22.0,22.0,a);
-            let max=if is_water{125.0}else{195.0};
+            let max=if is_water || timer_id.is_some(){125.0}else{195.0};
             nc.centered_text(43.0,14.0,&nc.fit(&a.title,11.0,W::Semibold,max),11.0,W::Semibold,theme::WHITE,H::Left);
             nc.centered_text(43.0,30.0,&nc.fit(&a.body,10.5,W::Regular,max),10.5,W::Regular,theme::GRAY,H::Left);
-            if is_water {
+            if let Some(id)=timer_id {
+                if notice_button(&nc,181.0,12.0,62.0,"稍后","timer-snooze"){self.notice=None;self.snooze_timer(&id);}
+                if notice_button(&nc,250.0,12.0,68.0,"定时设置","timer-settings"){self.notice=None;self.open_timers_settings();}
+            }else if is_water {
                 if notice_button(&nc,181.0,12.0,62.0,"稍后","water-snooze"){self.last_reminder=self.t-self.settings.water_minutes as f64*60.0+600.0;self.notice=None;}
                 if notice_button(&nc,250.0,12.0,68.0,"喝一口","water-confirm"){self.notice=None;self.drink_water();}
             }else{
@@ -628,9 +651,9 @@ mod tests {
 
     #[test]
     fn settings_groups_keep_every_page_reachable() {
-        let groups = ["常规", "音乐与歌词", "专注与饮水", "专注与饮水", "待办与置物", "待办与置物", "通知、邮箱与日程", "通知、邮箱与日程", "通知、邮箱与日程", "关于", "页面管理", "AI 额度"];
+        let groups = ["常规", "音乐与歌词", "专注与定时", "专注与定时", "待办与置物", "待办与置物", "通知、邮箱与日程", "通知、邮箱与日程", "通知、邮箱与日程", "关于", "页面管理", "AI 额度"];
         for (tab, expected) in groups.iter().enumerate() {
-            let matches: Vec<_> = SETTINGS_GROUPS.iter().filter(|(_,start,end)| (*start..=*end).contains(&tab)).collect();
+            let matches: Vec<_> = SETTINGS_GROUPS.iter().filter(|(_,tabs)| tabs.contains(&tab)).collect();
             assert_eq!(matches.len(), 1, "页面 {tab} 必须且只能属于一个分组");
             assert_eq!(matches[0].0, *expected);
         }
@@ -1032,9 +1055,24 @@ fn setting_choices(ui:&mut egui::Ui,title:&str,value:&mut u32,values:[u32;3],uni
     let options:Vec<(u32,&str)>=values.iter().zip(labels.iter()).map(|(v,l)|(*v,l.as_str())).collect();
     settings_control_row_right(ui,title,|ui|{settings_segmented(ui,value,&options,62.0);});
 }
-const SETTINGS_GROUPS: [(&str,usize,usize);8] = [
-    ("常规",0,0), ("页面管理",10,10), ("音乐与歌词",1,1), ("专注与饮水",2,3),
-    ("待办与置物",4,5), ("通知、邮箱与日程",6,8), ("AI 额度",11,11), ("关于",9,9),
+#[cfg(windows)]
+fn pick_data_dir()->Result<Option<String>,String>{
+    crate::system::pick_folder("选择岛仔数据目录")
+        .map(|p|p.map(|path|path.to_string_lossy().into_owned()))
+        .map_err(|e|format!("无法选择目录：{e}"))
+}
+#[cfg(not(windows))]
+fn pick_data_dir()->Result<Option<String>,String>{
+    Err("目录选择仅在 Windows 上可用，请直接输入路径".into())
+}
+
+/// 分组 → 它包含的设置子页编号。定时提醒内嵌在「饮水」子页，
+/// 不新增独立子页，既有编号与页面索引保持不变。
+const SETTINGS_GROUPS: [(&str,&[usize]);8] = [
+    ("常规",&[0]), ("页面管理",&[10]), ("音乐与歌词",&[1]),
+    ("专注与定时",&[2,3]),
+    ("待办与置物",&[4,5]), ("通知、邮箱与日程",&[6,7,8]),
+    ("AI 额度",&[11]), ("关于",&[9]),
 ];
 
 impl App {
@@ -1067,9 +1105,10 @@ impl App {
                 ui.add_space(5.0);
                 ui.label(egui::RichText::new("设置").size(11.0).color(settings_color(ctx,Color32::from_gray(150),Color32::from_gray(105))));
                 ui.add_space(7.0);
-                for (name,start,end) in SETTINGS_GROUPS {
+                for (name,tabs) in SETTINGS_GROUPS {
+                    let start=*tabs.first().unwrap_or(&0);
                     if start==9 {ui.add_space((ui.available_height()-38.0).max(0.0));}
-                    let selected=(start..=end).contains(&self.settings_tab);
+                    let selected=tabs.contains(&self.settings_tab);
                     let (rect,response)=ui.allocate_exact_size(egui::vec2(ui.available_width(),36.0),egui::Sense::click());
                     if response.clicked() && !selected{self.settings_tab=start;}
                     if selected || response.hovered(){
@@ -1115,13 +1154,13 @@ impl App {
                 ui.visuals_mut().selection.bg_fill=settings_color(ctx,Color32::from_rgb(45,105,165),Color32::from_rgb(209,226,248));
                 let titles=["常规","音乐与歌词","专注","饮水","待办","置物","通知","邮箱","日程","关于","页面管理","AI 额度"];
                 ui.label(egui::RichText::new(titles[self.settings_tab.min(11)]).size(18.0).strong().color(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))));
-                if let Some((_,start,end))=SETTINGS_GROUPS.iter().find(|(_,start,end)|(*start..=*end).contains(&self.settings_tab)) {
-                    if start!=end {
+                if let Some((_,tabs))=SETTINGS_GROUPS.iter().find(|(_,tabs)|tabs.contains(&self.settings_tab)) {
+                    if tabs.len()>1 {
                         ui.add_space(7.0);
                         egui::Frame::new().fill(settings_color(ctx,Color32::from_rgb(33,33,36),Color32::from_rgb(232,235,240))).corner_radius(8.0).inner_margin(3).show(ui,|ui|{
                             ui.spacing_mut().item_spacing.x=2.0;
                             ui.horizontal(|ui|{
-                                for index in *start..=*end {
+                                for index in tabs.iter().copied() {
                                     let selected=self.settings_tab==index;
                                     let button=egui::Button::new(egui::RichText::new(titles[index]).size(12.0).color(if selected{settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))}else{settings_color(ctx,Color32::from_gray(210),Color32::from_gray(55))}))
                                         .fill(if selected{settings_color(ctx,Color32::from_rgb(70,70,74),Color32::from_rgb(205,215,229))}else{Color32::TRANSPARENT})
@@ -1339,6 +1378,8 @@ impl App {
                                 }).response
                             });
                         });
+                        self.stand_timer_settings(ui);
+                        self.custom_timer_settings(ui);
                     }
                     4=>{
                         settings_label(ui,"待办清单");
@@ -1695,6 +1736,41 @@ impl App {
                                 ui.hyperlink_to("CC BY 4.0", "https://creativecommons.org/licenses/by/4.0/");
                             });
                         });
+                        // 高级项默认收起：关于页保持简洁，也避免长说明影响字体图集的光栅化一致性。
+                        ui.collapsing("数据文件位置（高级）",|ui|{
+                            settings_card(ui,|ui|{
+                                ui.label(egui::RichText::new(format!("当前：{}",crate::model::config_dir().display())).size(11.5).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
+                                settings_control_row(ui,"新目录",80.0,|ui|{
+                                    ui.add_sized([ui.available_width().min(360.0),28.0],egui::TextEdit::singleline(&mut self.data_dir_input).hint_text("例如 D:\\DaozaiData"))
+                                });
+                                ui.horizontal(|ui|{
+                                    if ui.button("浏览…").clicked(){
+                                        match pick_data_dir(){
+                                            Ok(Some(path))=>{self.data_dir_input=path;self.data_dir_status.clear();},
+                                            Ok(None)=>{},
+                                            Err(e)=>self.data_dir_status=e,
+                                        }
+                                    }
+                                    if ui.button("更改并迁移").clicked(){
+                                        let raw=self.data_dir_input.trim().to_string();
+                                        match crate::model::set_data_dir(std::path::Path::new(&raw)){
+                                            Ok(count)=>self.data_dir_status=format!("已复制 {count} 个文件到新目录，原目录保留作备份。重启岛仔后完全生效。"),
+                                            Err(e)=>self.data_dir_status=e,
+                                        }
+                                    }
+                                    if ui.button("恢复默认").clicked(){
+                                        match crate::model::reset_data_dir(){
+                                            Ok(_)=>self.data_dir_status="已恢复默认目录，重启岛仔后生效。".into(),
+                                            Err(e)=>self.data_dir_status=e,
+                                        }
+                                    }
+                                });
+                                if !self.data_dir_status.is_empty(){
+                                    ui.add(egui::Label::new(egui::RichText::new(self.data_dir_status.as_str()).size(11.0).color(settings_color(ctx,Color32::from_rgb(240,190,110),Color32::from_rgb(150,90,20)))).wrap());
+                                }
+                                settings_hint(ui,"引导文件固定放在 %APPDATA%\\Daozai；邮箱与日历密码存于 Windows 凭据管理器，不随目录迁移。若设置了 DAOZAI_DATA_DIR 环境变量，它会覆盖这里的设置。");
+                            });
+                        });
                         settings_label(ui,"支持作者");
                         settings_card(ui,support_author);
                     }
@@ -1705,6 +1781,146 @@ impl App {
             if before!=format!("{:?}",self.settings){self.settings.save();}
             ctx.set_style(original_style);
         });
+    }
+}
+
+enum TimerAction { None, Save, Cancel }
+
+impl App {
+    /// 「站立提醒」：内置预设，一个开关加间隔/时段，不占用自定义提醒列表。
+    pub(crate) fn stand_timer_settings(&mut self, ui:&mut egui::Ui) {
+        let now=chrono::Local::now().timestamp();
+        let current=self.timers.stand().cloned();
+        let mut enabled=current.as_ref().is_some_and(|i|i.enabled);
+        let mut minutes=match current.as_ref().map(|i|i.mode){
+            Some(crate::timers::TimerMode::Interval{minutes})=>minutes,
+            _=>45,
+        };
+        let mut start_hour=current.as_ref().map(|i|i.start_hour).unwrap_or(9);
+        let mut end_hour=current.as_ref().map(|i|i.end_hour).unwrap_or(22);
+        let mut changed=false;
+        settings_label(ui,"站立提醒");
+        settings_card(ui,|ui|{
+            let was_enabled=enabled;
+            setting_row(ui,"久坐提醒","按间隔提醒起身活动，时段之外不打扰",&mut enabled);
+            changed|=enabled!=was_enabled;
+            ui.separator();
+            changed|=setting_number(ui,"提醒间隔",&mut minutes,1u32,720u32," 分钟",5.0);
+            settings_control_row_right(ui,"生效时段",|ui|{
+                changed|=ui.add(egui::DragValue::new(&mut start_hour).range(0..=24).speed(1.0).suffix(" 时")).changed();
+                ui.label("至");
+                changed|=ui.add(egui::DragValue::new(&mut end_hour).range(0..=24).speed(1.0).suffix(" 时")).changed();
+                ui.label(egui::RichText::new("相同 = 全天").size(11.0).color(ui.visuals().weak_text_color()));
+            });
+        });
+        // 只在真的改动时写回，否则每帧都会把计时基准重置成当前时间，提醒永远不会触发。
+        if changed {
+            self.timers.set_stand(enabled,minutes,start_hour,end_hour,now);
+            self.timers.save();
+        }
+    }
+
+    /// 「自定义定时提醒」：已有提醒 + 快速模板 + 新增/编辑表单（例如抽烟提醒）。
+    pub(crate) fn custom_timer_settings(&mut self, ui:&mut egui::Ui) {
+        use crate::timers::{TimerForm,STAND_ID};
+        // 表单状态放在 App 上，用 take/放回的方式跨帧保留，也避免闭包里同时借用两个字段。
+        let mut form=std::mem::take(&mut self.timer_form);
+        let mut action=TimerAction::None;
+
+        settings_label(ui,"自定义定时提醒");
+        settings_hint(ui,"间隔提醒按分钟循环，每日提醒在设定时刻触发一次；都能设置标题、正文和生效时段。");
+        let mut edit_pick:Option<String>=None;
+        {
+            let timers=&mut self.timers;
+            settings_card(ui,|ui|{
+                if !timers.items.iter().any(|i|i.id!=STAND_ID){settings_hint(ui,"还没有自定义提醒，可用下方的模板快速添加。");}
+                let mut changed=false;
+                let mut remove:Option<String>=None;
+                for item in timers.items.iter_mut().filter(|i|i.id!=STAND_ID){
+                    let id=item.id.clone();
+                    ui.push_id(&id,|ui|{
+                        ui.horizontal(|ui|{
+                            if switch(ui,&mut item.enabled){changed=true;}
+                            ui.label(egui::RichText::new(&item.title).size(13.0).strong());
+                            ui.label(egui::RichText::new(item.summary()).size(11.0).color(ui.visuals().weak_text_color()));
+                        });
+                        ui.horizontal(|ui|{
+                            ui.add(egui::Label::new(egui::RichText::new(&item.body).size(11.0).color(ui.visuals().weak_text_color())).wrap());
+                            if ui.button("编辑").clicked(){edit_pick=Some(id.clone());}
+                            if ui.button("删除").clicked(){remove=Some(id.clone());}
+                        });
+                    });
+                    ui.separator();
+                }
+                if let Some(id)=remove{timers.remove(&id);changed=true;}
+                if changed{timers.save();}
+            });
+            if let Some(id)=edit_pick{if let Some(item)=timers.find(&id){form=TimerForm::from_item(item);}}
+        }
+
+        settings_label(ui,if form.editing.is_some(){"编辑定时提醒"}else{"新增定时提醒"});
+        let mut preset_smoke=false;
+        settings_card(ui,|ui|{
+            if form.editing.is_none(){
+                ui.horizontal(|ui|{
+                    ui.label(egui::RichText::new("快速添加").size(11.5));
+                    if ui.button("抽烟提醒").clicked(){preset_smoke=true;}
+                });
+            }
+            settings_control_row(ui,"标题",80.0,|ui|{
+                ui.add_sized([ui.available_width().min(340.0),28.0],egui::TextEdit::singleline(&mut form.title).hint_text("例如：抽烟提醒"))
+            });
+            settings_control_row(ui,"内容",80.0,|ui|{
+                ui.add_sized([ui.available_width().min(340.0),28.0],egui::TextEdit::singleline(&mut form.body).hint_text("提醒时显示的文字，可留空"))
+            });
+            settings_control_row_right(ui,"方式",|ui|{
+                settings_segmented(ui,&mut form.mode_index,&[(0usize,"间隔提醒"),(1usize,"每日时刻")],76.0);
+            });
+            if form.mode_index==0 {
+                setting_number(ui,"间隔",&mut form.interval_minutes,1u32,720u32," 分钟",5.0);
+            } else {
+                settings_control_row_right(ui,"时刻",|ui|{
+                    ui.add(egui::DragValue::new(&mut form.hour).range(0..=23).speed(1.0).suffix(" 时"));
+                    ui.add(egui::DragValue::new(&mut form.minute).range(0..=59).speed(1.0).suffix(" 分"));
+                });
+            }
+            settings_control_row_right(ui,"生效时段",|ui|{
+                ui.add(egui::DragValue::new(&mut form.start_hour).range(0..=24).speed(1.0).suffix(" 时"));
+                ui.label("至");
+                ui.add(egui::DragValue::new(&mut form.end_hour).range(0..=24).speed(1.0).suffix(" 时"));
+                ui.label(egui::RichText::new("相同 = 全天").size(11.0).color(ui.visuals().weak_text_color()));
+            });
+            settings_control_row_right(ui,"启用",|ui|{switch(ui,&mut form.enabled);});
+            ui.horizontal(|ui|{
+                if ui.button(if form.editing.is_some(){"保存修改"}else{"添加提醒"}).clicked(){action=TimerAction::Save;}
+                if form.editing.is_some() && ui.button("取消").clicked(){action=TimerAction::Cancel;}
+            });
+            if !form.status.is_empty(){
+                ui.add(egui::Label::new(egui::RichText::new(form.status.as_str()).size(11.0).color(Color32::from_rgb(240,150,140))).wrap());
+            }
+        });
+
+        if preset_smoke {form=TimerForm::preset_smoke();}
+
+        match action {
+            TimerAction::Save=>{
+                let now=chrono::Local::now().timestamp();
+                let id=form.editing.clone().unwrap_or_else(||format!("timer-{}",std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_nanos()).unwrap_or_default()));
+                let old=self.timers.find(&id).cloned();
+                if let Some(mut item)=form.to_item(id,now){
+                    // 编辑时保留上一次触发时间，避免改个标题就立刻重新倒计时。
+                    if let Some(old)=old{item.last_fired=old.last_fired;item.fired_on=old.fired_on;item.snooze_until=old.snooze_until;}
+                    self.timers.replace(item);
+                    self.timers.save();
+                    form=TimerForm::default();
+                }else{
+                    form.status="请先填写提醒标题".into();
+                }
+            }
+            TimerAction::Cancel=>form=TimerForm::default(),
+            TimerAction::None=>{}
+        }
+        self.timer_form=form;
     }
 }
 

@@ -702,6 +702,8 @@ fn open_path(p: &std::path::Path)->Result<(),String> {
 fn open_path(_p: &std::path::Path)->Result<(),String> {Ok(())}
 
 fn main() -> std::process::ExitCode {
+    // 必须在任何配置/日志读取之前应用用户选择的数据目录。
+    daozai::model::apply_data_dir_bootstrap();
     diagnostics::install();
     match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,

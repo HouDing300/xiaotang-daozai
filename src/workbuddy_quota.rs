@@ -105,11 +105,22 @@ pub fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>
     }
     browser_snapshot(Some(id)).map(|(_,s)|s).map_err(|e|(e,30))
 }
+const BRIDGE_ADDR:&str="127.0.0.1:10086";
+const COOKIE_NAMES:[&str;4]=["session","session_2","cb_login_mode","cb_login_realm"];
+const DEFAULT_UA:&str="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0";
+/// 本机没装桥接服务时给出可操作的提示，而不是笼统的「扩展未响应」。
+const BRIDGE_MISSING:&str="未检测到浏览器连接服务（127.0.0.1:10086）。请安装或启用对应的浏览器扩展桥接，或改用下方「使用 Cookie 连接」（无需扩展）。";
+fn bridge_available()->bool{
+    let Ok(addr)=BRIDGE_ADDR.parse::<std::net::SocketAddr>()else{return false};
+    std::net::TcpStream::connect_timeout(&addr,Duration::from_millis(400)).is_ok()
+}
 fn bridge(agent:&ureq::Agent,action:&str,args:Value)->Result<Value,String>{
-    let response=agent.post("http://127.0.0.1:10086/command").set("Content-Type","application/json").send_string(&json!({"action":action,"args":args,"session":"daozai-workbuddy"}).to_string()).map_err(|_|if action=="list_browser_tabs"{"浏览器扩展未响应，等待恢复连接"}else{"浏览器会话响应超时，稍后重试"})?;
+    // 没有桥接服务时立刻返回，避免每次点击都干等 25 秒超时。
+    if !bridge_available(){return Err(if action=="list_browser_tabs"{BRIDGE_MISSING.into()}else{"浏览器连接服务已断开，请重新连接".into()});}
+    let response=agent.post("http://127.0.0.1:10086/command").set("Content-Type","application/json").send_string(&json!({"action":action,"args":args,"session":"daozai-workbuddy"}).to_string()).map_err(|_|if action=="list_browser_tabs"{"浏览器连接服务没有响应，请确认扩展已启用后重试"}else{"浏览器会话响应超时，稍后重试"})?;
     let mut raw=String::new();response.into_reader().take(2*1024*1024).read_to_string(&mut raw).map_err(|_|"读取浏览器会话失败")?;
-    let value:Value=serde_json::from_str(&raw).map_err(|_|"浏览器扩展返回无效数据")?;
-    if value["ok"]!=true{return Err("请检查 Kimi 浏览器扩展连接后重试".into());}Ok(value["data"].clone())
+    let value:Value=serde_json::from_str(&raw).map_err(|_|"浏览器连接服务返回无效数据")?;
+    if value["ok"]!=true{return Err("浏览器连接服务拒绝了请求，请确认扩展已启用后重试".into());}Ok(value["data"].clone())
 }
 fn browser_snapshot(expected:Option<&str>)->Result<(String,Snapshot),String>{
     let agent=ureq::AgentBuilder::new().try_proxy_from_env(false).timeout(Duration::from_secs(25)).redirects(0).build();
@@ -132,7 +143,7 @@ fn browser_snapshot(expected:Option<&str>)->Result<(String,Snapshot),String>{
         let cookie=cookies["cookies"].as_array().into_iter().flatten().filter_map(|c|{
             if c["path"].as_str()!=Some("/"){return None;}
             let name=c["name"].as_str()?;
-            if !matches!(name,"session"|"session_2"|"cb_login_mode"|"cb_login_realm"){return None;}
+            if !COOKIE_NAMES.contains(&name){return None;}
             let value=c["value"].as_str()?;if value.contains([';','\r','\n']){return None;}
             Some(format!("{name}={value}"))
         }).collect::<Vec<_>>().join("; ");
@@ -143,6 +154,54 @@ fn browser_snapshot(expected:Option<&str>)->Result<(String,Snapshot),String>{
     }
     Err(if other_account{"浏览器当前打开了其他 WorkBuddy 账号，请打开已绑定账号的用量页"}else{"等待 WorkBuddy 用量页恢复登录，请打开官网确认登录状态"}.into())
 }
+
+/// 只保留官网登录需要的 Cookie，避免把浏览器里的其它站点凭据一起存下来。
+fn cookie_header(raw:&str)->Result<String,String>{
+    let raw=raw.trim();
+    let raw=raw.strip_prefix("Cookie:").or_else(||raw.strip_prefix("cookie:")).unwrap_or(raw).trim();
+    if raw.is_empty(){return Err("请先粘贴 Cookie 请求头".into());}
+    if raw.contains(['\r','\n']){return Err("Cookie 格式无效，请复制单行请求头".into());}
+    let mut kept=Vec::new();
+    for part in raw.split(';'){
+        let (name,value)=part.trim().split_once('=').ok_or_else(||"Cookie 格式无效，请复制完整的请求头".to_string())?;
+        let (name,value)=(name.trim(),value.trim());
+        if !COOKIE_NAMES.contains(&name){continue;}
+        if value.is_empty()||value.contains([';','"','\r','\n']){return Err("Cookie 内容无效".into());}
+        kept.push(format!("{name}={value}"));
+    }
+    if !kept.iter().any(|s|s.starts_with("session=")||s.starts_with("session_2=")){
+        return Err("Cookie 里没有找到登录凭据（session），请确认复制的是官网用量页请求".into());
+    }
+    Ok(kept.join("; "))
+}
+fn verify_manual(agent:&ureq::Agent,session:&Session,expected:Option<&str>)->Result<(String,Snapshot),String>{
+    let profile=api(agent,session,"/console/account").map_err(Failure::message)?;
+    let uid=profile.pointer("/data/uid").and_then(Value::as_str).filter(|s|!s.is_empty())
+        .ok_or_else(||"官网未返回 WorkBuddy 账号信息，请确认已登录并复制完整 Cookie".to_string())?;
+    let id=slot(uid);
+    if expected.is_some_and(|e|e!=id){return Err("当前 Cookie 属于另一个 WorkBuddy 账号，请切回原账号后重试".into());}
+    if profile.pointer("/data/isCurrentOneIdEnterprise")==Some(&Value::Bool(true)){return Err("企业账号暂不支持，请切换到个人账号".into());}
+    let value=api(agent,session,SUMMARY).map_err(Failure::message)?;
+    Ok((id,parse(&value)?))
+}
+/// 不依赖浏览器扩展：用户复制官网 Cookie，岛仔验证账号与积分后安全保存会话。
+pub fn connect_with_cookie(alias:String,header:&str,expected:Option<String>)->Result<Connected,String>{
+    let cookie=cookie_header(header)?;
+    let agent=super::http_agent();
+    let mut last=String::new();
+    // 两个官网域名都兼容，用户不必判断自己登录的是哪一个。
+    for origin in ["https://www.codebuddy.cn","https://www.workbuddy.cn"]{
+        let session=Session{origin:origin.into(),ua:DEFAULT_UA.into(),cookie:cookie.clone()};
+        match verify_manual(&agent,&session,expected.as_deref()){
+            Ok((id,snapshot))=>{
+                save_session(&id,&session)?;
+                return Ok(Connected{slot:id,label:if alias.trim().is_empty(){"WorkBuddy".into()}else{alias.trim().into()},snapshot});
+            },
+            Err(error)=>{if last.is_empty()||!error.contains("暂时无法连接"){last=error;}},
+        }
+    }
+    Err(last)
+}
 pub struct Connected {pub slot:String,pub label:String,pub snapshot:Snapshot}
 pub struct Connect {rx:mpsc::Receiver<Result<Connected,String>>}
 impl Connect {
@@ -151,6 +210,13 @@ impl Connect {
             let (slot,snapshot)=browser_snapshot(expected.as_deref())?;
             Ok(Connected{slot,label:if alias.trim().is_empty(){"WorkBuddy".into()}else{alias.trim().into()},snapshot})
         })();let _=tx.send(result);});Self{rx}
+    }
+    /// 无浏览器扩展时的连接入口。
+    pub fn start_with_cookie(alias:String,header:String,expected:Option<String>)->Self{
+        let(tx,rx)=mpsc::channel();std::thread::spawn(move||{
+            let result=connect_with_cookie(alias,&header,expected);
+            let _=tx.send(result);
+        });Self{rx}
     }
     pub fn poll(&self)->Option<Result<Connected,String>>{self.rx.try_recv().ok()}
 }
@@ -179,5 +245,17 @@ impl Connect {
         let s=parse(&json!({"code":0,"data":{"Packages":[{"PackageCode":"base","CycleRemainCapacity":"1200"},{"PackageCode":"gift","CycleRemainCapacity":80}]}})).unwrap();let c=s.credits.unwrap();assert_eq!(c.remaining,1280.0);assert_eq!(c.compact(),"1.28k");assert_eq!(c.full(),"1,280");
         for v in [json!({"code":0}),json!({"code":401}),json!({"code":0,"data":{"Packages":[{}]}}),json!({"code":0,"data":{"Packages":[{"CycleRemainCapacity":-1}]}})]{assert!(parse(&v).is_err());}
         assert_eq!(parse(&json!({"code":0,"data":{"Packages":[]}})).unwrap().credits.unwrap().remaining,0.0);
+    }
+    #[test]fn workbuddy_cookie_header_keeps_only_login_cookies(){
+        assert_eq!(cookie_header("Cookie: session=abc; foo=bar; session_2=def; cb_login_mode=1").unwrap(),"session=abc; session_2=def; cb_login_mode=1");
+        assert_eq!(cookie_header("  session=abc  ").unwrap(),"session=abc");
+        for bad in ["", "foo=bar", "session=", "session=abc\r\nX: y", "session=a\"b"]{assert!(cookie_header(bad).is_err(),"{bad}");}
+    }
+    #[test]fn workbuddy_bridge_error_is_actionable_without_extension(){
+        if bridge_available(){return;} // 开发机装了桥接服务时跳过
+        let agent=ureq::AgentBuilder::new().timeout(Duration::from_secs(2)).build();
+        let error=bridge(&agent,"list_browser_tabs",json!({})).unwrap_err();
+        assert!(error.contains("Cookie 连接"),"{error}");
+        assert!(!error.contains("Kimi"),"{error}");
     }
 }

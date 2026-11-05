@@ -6,22 +6,173 @@
 //!   %APPDATA%\Daozai\todo.txt
 //!   %APPDATA%\Daozai\water.txt      -> bottle=<ml> / goal=<ml> / start=YYYY-MM-DD
 //!   %APPDATA%\Daozai\shelf.txt      -> 置物清单（每行一个绝对路径）
+//!   %APPDATA%\Daozai\timers.json    -> 自定义定时提醒
 //!
-//! 设置环境变量 `DAOZAI_DATA_DIR` 可把以上目录整体改到别处（用于与已安装的
-//! 原工具并存、或跑测试时不碰真实数据）。
+//! 数据目录优先级：环境变量 `DAOZAI_DATA_DIR`（开发/测试）> 引导文件
+//! `%APPDATA%\Daozai\data-dir.txt`（设置里可视化更改）> 默认目录。
+//! 引导文件固定放在默认目录，不会随数据一起被搬走；`main()` 启动时读一次并
+//! 注入环境变量，因此 `config_dir()` 每次调用仍然只是读环境变量，无额外 IO。
+//!
+//! 所有用户数据都通过 `config_dir()` 取路径，切换目录时需迁移的文件见
+//! `DATA_ENTRIES`。
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 fn env_dir(key: &str) -> PathBuf {
-    PathBuf::from(std::env::var(key).unwrap_or_else(|_| ".".into()))
+    std::env::var_os(key).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// 默认（也是引导文件所在）目录，不随用户设置变化。
+pub fn default_config_dir() -> PathBuf {
+    env_dir("APPDATA").join("Daozai")
+}
+
+/// 引导文件：内容只有一行，即用户选择的数据目录。
+pub fn data_dir_pointer_path() -> PathBuf {
+    default_config_dir().join("data-dir.txt")
+}
+
+fn parse_data_dir_pointer(text: &str) -> Option<PathBuf> {
+    let line = text.trim().trim_start_matches('\u{feff}').trim();
+    if line.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(line);
+    path.is_absolute().then_some(path)
+}
+
+fn read_data_dir_pointer() -> Option<PathBuf> {
+    let text = fs::read_to_string(data_dir_pointer_path()).ok()?;
+    parse_data_dir_pointer(&text)
+}
+
+/// 由外壳在启动时、任何配置读取之前调用一次。
+pub fn apply_data_dir_bootstrap() {
+    if std::env::var_os("DAOZAI_DATA_DIR").is_some() {
+        return;
+    }
+    if let Some(path) = read_data_dir_pointer() {
+        if fs::create_dir_all(&path).is_ok() {
+            std::env::set_var("DAOZAI_DATA_DIR", &path);
+        }
+    }
 }
 
 pub fn config_dir() -> PathBuf {
-    if let Ok(root) = std::env::var("DAOZAI_DATA_DIR") {
-        return PathBuf::from(root);
+    if let Some(root) = std::env::var_os("DAOZAI_DATA_DIR") {
+        if !root.is_empty() {
+            return PathBuf::from(root);
+        }
     }
-    env_dir("APPDATA").join("Daozai")
+    default_config_dir()
+}
+
+/// 切换数据目录时需要复制的文件和子目录（引导文件不在此列）。
+pub const DATA_ENTRIES: &[&str] = &[
+    "settings.txt",
+    "todo.txt",
+    "water.txt",
+    "water-extra.txt",
+    "shelf.txt",
+    "timers.json",
+    "notification-apps.json",
+    "mail-accounts.json",
+    "calendar.json",
+    "local-calendar.json",
+    "clipboard.json",
+    "ai-quota.json",
+    "ai-quota-cache.json",
+    "kugou-control.json",
+    "glass-diagnostics.txt",
+    "lyrics",
+    "credentials",
+    "diagnostics",
+];
+
+fn copy_file_if_absent(from: &Path, to: &Path, copied: &mut usize) -> std::io::Result<()> {
+    if to.exists() || !from.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(from, to)?;
+    *copied += 1;
+    Ok(())
+}
+
+fn copy_entry(from: &Path, to: &Path, copied: &mut usize) -> std::io::Result<()> {
+    if from.is_dir() {
+        fs::create_dir_all(to)?;
+        for entry in fs::read_dir(from)? {
+            let entry = entry?;
+            copy_entry(&entry.path(), &to.join(entry.file_name()), copied)?;
+        }
+        Ok(())
+    } else {
+        copy_file_if_absent(from, to, copied)
+    }
+}
+
+/// 把旧目录里的数据复制到新目录；已存在的目标文件不覆盖，旧文件保留作备份。
+pub fn migrate_data_dir(from: &Path, to: &Path) -> Result<usize, String> {
+    fs::create_dir_all(to).map_err(|e| format!("无法创建数据目录：{e}"))?;
+    let mut copied = 0;
+    for name in DATA_ENTRIES {
+        copy_entry(&from.join(name), &to.join(name), &mut copied)
+            .map_err(|e| format!("迁移 {name} 失败：{e}"))?;
+    }
+    Ok(copied)
+}
+
+fn write_data_dir_pointer(path: &Path) -> Result<(), String> {
+    let pointer = data_dir_pointer_path();
+    if let Some(parent) = pointer.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("无法写入引导文件：{e}"))?;
+    }
+    atomic_write(&pointer, path.to_string_lossy().as_bytes())
+        .map_err(|e| format!("无法写入引导文件：{e}"))
+}
+
+/// 在设置里更改数据目录：校验 → 迁移 → 写引导文件。重启后完全生效。
+pub fn set_data_dir(path: &Path) -> Result<usize, String> {
+    if path.as_os_str().is_empty() || !path.is_absolute() {
+        return Err("请填写绝对路径，例如 D:\\DaozaiData".into());
+    }
+    if path.exists() && !path.is_dir() {
+        return Err("这个位置是文件，请选择文件夹".into());
+    }
+    fs::create_dir_all(path).map_err(|e| format!("无法创建数据目录：{e}"))?;
+    let probe = path.join(format!(".daozai-write-{}.tmp", std::process::id()));
+    fs::write(&probe, b"ok").map_err(|e| format!("目录不可写：{e}"))?;
+    let _ = fs::remove_file(&probe);
+
+    let current = config_dir();
+    if let (Ok(a), Ok(b)) = (fs::canonicalize(&current), fs::canonicalize(path)) {
+        if a == b {
+            return Err("新目录与当前数据目录相同".into());
+        }
+    }
+    let copied = migrate_data_dir(&current, path)?;
+    write_data_dir_pointer(path)?;
+    Ok(copied)
+}
+
+/// 恢复默认目录：把当前自定义目录里的数据复制回默认目录并删除引导文件。
+pub fn reset_data_dir() -> Result<usize, String> {
+    let default = default_config_dir();
+    let current = config_dir();
+    let copied = if fs::canonicalize(&current).ok() == fs::canonicalize(&default).ok() {
+        0
+    } else {
+        migrate_data_dir(&current, &default)?
+    };
+    let pointer = data_dir_pointer_path();
+    if pointer.exists() {
+        fs::remove_file(&pointer).map_err(|e| format!("无法删除引导文件：{e}"))?;
+    }
+    Ok(copied)
 }
 
 fn read_kv(path: &Path) -> Vec<(String, String)> {
@@ -890,5 +1041,43 @@ impl NotificationApps {
         if let Some(item)=self.items.iter().find(|a|a.0==id){return item.2;}
         let enabled=true;
         self.items.push((id.to_string(),name.to_string(),enabled));self.save();enabled
+    }
+}
+
+#[cfg(test)]
+mod data_dir_tests {
+    use super::*;
+
+    #[test]
+    fn pointer_only_accepts_absolute_paths() {
+        assert!(parse_data_dir_pointer("").is_none());
+        assert!(parse_data_dir_pointer("relative/folder").is_none());
+        let absolute = if cfg!(windows) { r"C:\DaozaiData" } else { "/tmp/daozai-data" };
+        assert_eq!(
+            parse_data_dir_pointer(&format!("\u{feff}{absolute}\n")),
+            Some(PathBuf::from(absolute))
+        );
+    }
+
+    #[test]
+    fn migration_copies_files_and_subdirectories_without_overwriting() {
+        let base = std::env::temp_dir().join(format!(
+            "daozai-data-dir-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        let from = base.join("old");
+        let to = base.join("new");
+        fs::create_dir_all(from.join("lyrics")).unwrap();
+        fs::write(from.join("settings.txt"), b"pet=1\n").unwrap();
+        fs::write(from.join("lyrics").join("a.lrc"), b"lyric").unwrap();
+        fs::create_dir_all(&to).unwrap();
+        fs::write(to.join("settings.txt"), b"pet=0\n").unwrap();
+        let copied = migrate_data_dir(&from, &to).unwrap();
+        assert_eq!(copied, 1, "已存在的目标文件不覆盖");
+        assert_eq!(fs::read(to.join("settings.txt")).unwrap(), b"pet=0\n");
+        assert_eq!(fs::read(to.join("lyrics").join("a.lrc")).unwrap(), b"lyric");
+        assert!(from.join("settings.txt").exists(), "旧目录保留作备份");
+        let _ = fs::remove_dir_all(&base);
     }
 }

@@ -29,6 +29,8 @@ cargo run --locked --bin daozai
 | `src/calendar.rs`、`src/calendar_ui.rs` | CalDAV、重复日程、月历与列表 |
 | `src/mail.rs`、`src/mail_reader.rs` | IMAP、MIME、验证码与邮件阅读 |
 | `src/quota*.rs` 及 provider 模块 | AI 额度与连接 |
+| `src/timers.rs` | 自定义定时提醒的数据、触发判定与单元测试 |
+| `src/model.rs` | 配置读写与数据目录引导／迁移 |
 | `src/native.rs`、`src/system.rs` | 原生窗口、输入、拖放和系统事件 |
 | `src/ui_tests.rs` | 无窗口交互与布局回归测试 |
 | `src/bin/daozai-record` | 合成数据演示与软件渲染器 |

@@ -622,6 +622,13 @@ pub struct App {
     pub(crate) ring_shown: Spring,
     pub(crate) reset_spin: Spring,
 
+    // 自定义定时提醒（设置分组「专注与定时」）
+    pub(crate) timers: crate::timers::TimerList,
+    pub(crate) timer_form: crate::timers::TimerForm,
+    // 设置 → 关于：数据目录表单
+    pub(crate) data_dir_input: String,
+    pub(crate) data_dir_status: String,
+
     // 待办
     pub(crate) adding: bool,
     pub(crate) editing: Option<usize>,
@@ -765,6 +772,10 @@ impl App {
             water_view_t: Spring::new(0.0, 200.0, 0.9),
             remind_t: Spring::new(1.0, 400.0, 0.8),
             last_reminder: 0.0,
+            timers: crate::timers::TimerList::load(),
+            timer_form: Default::default(),
+            data_dir_input: String::new(),
+            data_dir_status: String::new(),
             pomo: Pomo { phase: Phase::Focus, remaining: focus_seconds, running: false },
             ring_shown: Spring::new(1.0, 160.0, 0.95),
             reset_spin: Spring::new(0.0, 160.0, 0.82),
@@ -2436,7 +2447,7 @@ impl App {
     }
 
     // ---------------------------------------------------------------
-    // 每帧推进：番茄钟、饮水提醒、跨天
+    // 每帧推进：番茄钟、饮水提醒、自定义定时提醒、跨天
     // ---------------------------------------------------------------
     fn tick(&mut self, env: &Env, dt: f32, elapsed: f32) {
         if self.toast.as_ref().is_some_and(|(_,at)|self.t-at>2.4){self.toast=None;}
@@ -2472,6 +2483,7 @@ impl App {
             self.last_reminder = self.t;
             self.alert("喝水时间到了", format!("休息一下，喝 {} ml 水吧", self.settings.serving_ml), 2, true);
         }
+        self.tick_timers(env);
         let now = format!("{} {}", env.today, env.clock.get(..5).unwrap_or("00:00"));
         let due: Vec<_> = self.todos.items.iter().enumerate().filter(|(_, item)| item.reminder_due(&now)).map(|(i,item)| (i,item.text.clone())).collect();
         for (i,text) in due { self.todos.items[i].mark_reminded(&now); self.todos.save(); self.alert("待办到时间了", text, 4, true); }
