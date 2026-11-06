@@ -3218,11 +3218,16 @@ fn full_mail_reader_keeps_the_entire_body_and_scrolls_independently(){
         h.ctx.set_embed_viewports(true);h.t+=1.0/60.0;
         let out=h.ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(700.0,620.0))),time:Some(h.t),events,focused:true,..Default::default()},|ctx|h.app.mail_reader_ui(ctx));h.shapes=out.shapes;
     };
-    let top=|h:&H|h.shapes.iter().find_map(|s|match &s.shape{egui::Shape::Text(t)if t.galley.text().ends_with("最后一段：全文结束")=>Some(t.visual_bounding_rect().top()),_=>None}).expect("阅读窗口应包含邮件末尾");
-    render(&mut h,vec![]);render(&mut h,vec![]);let before=top(&h);
-    render(&mut h,vec![egui::Event::PointerMoved(egui::pos2(350.0,300.0)),egui::Event::MouseWheel{unit:egui::MouseWheelUnit::Point,delta:egui::vec2(0.0,-400.0),modifiers:Default::default()}]);
-    for _ in 0..15{render(&mut h,vec![]);}
-    assert!(top(&h)<before-100.0,"阅读窗口的滚轮应向下滚动正文");
+    // 正文按块拆分渲染，视口外的块会被 egui 裁掉：用「能否看到末尾」验证完整性。
+    let tail=|h:&H|h.shapes.iter().filter(|s|s.clip_rect.intersects(Rect::from_min_size(Pos2::ZERO,egui::vec2(700.0,620.0)))).find_map(|s|match &s.shape{egui::Shape::Text(t)if t.galley.text().ends_with("最后一段：全文结束")=>Some(t.visual_bounding_rect().top()),_=>None});
+    render(&mut h,vec![]);render(&mut h,vec![]);
+    assert!(tail(&h).is_none(),"长正文一开始停在顶部，末尾不该出现");
+    render(&mut h,vec![egui::Event::PointerMoved(egui::pos2(350.0,300.0))]);
+    for _ in 0..80{render(&mut h,vec![egui::Event::MouseWheel{unit:egui::MouseWheelUnit::Point,delta:egui::vec2(0.0,-240.0),modifiers:Default::default()}]);}
+    let bottom=tail(&h).expect("滚到底应能看到邮件末尾");
+    assert!(bottom>0.0&&bottom<620.0,"末尾正文应落在窗口可视范围内：{bottom}");
+    for _ in 0..80{render(&mut h,vec![egui::Event::MouseWheel{unit:egui::MouseWheelUnit::Point,delta:egui::vec2(0.0,240.0),modifiers:Default::default()}]);}
+    assert!(tail(&h).is_none(),"向上滚回顶部后末尾应离开视口");
     assert!(h.app.mail.reading.is_some(),"新邮件列表变化不能打断已经打开的正文");
 }
 
@@ -5372,3 +5377,71 @@ fn island_timer_page_toggles_rows_and_opens_settings(){
     assert_eq!(h.app.timer_form.editing.as_deref(),Some("water"),"应带着这条提醒进编辑");
 }
 
+
+#[test]
+#[ignore="按需导出定时三页与提醒卡片的实际渲染画面，供人工核对排版"]
+fn timers_layout_gallery(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());
+    let dest=std::path::PathBuf::from(std::env::var_os("DAOZAI_GALLERY_DIR").expect("需要 DAOZAI_GALLERY_DIR"));
+    std::fs::create_dir_all(&dest).unwrap();
+    let now=chrono::Local::now().timestamp();
+    let today=chrono::Local::now().format("%Y-%m-%d").to_string();
+    let shoot=|h:&mut H,name:&str|{
+        let mut raster=crate::preview_raster::Raster::new(1280,380);
+        for frame in 0..100 {
+            let t=frame as f64/60.0;
+            let env=Env{t,clock:"09:41:00".into(),today:today.clone(),date:"11月6日 周五".into(),..Default::default()};
+            let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(WIN_W,WIN_H))),time:Some(t),
+                viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(2.0),..Default::default()})).collect(),..Default::default()};
+            let output=h.ctx.run(raw,|ctx|{
+                egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx,|ui|{let win=ui.max_rect();h.app.frame(ui,win,&env);});
+            });
+            raster.update_textures(&output.textures_delta);
+            if frame==99 {
+                raster.buf.fill([0.09,0.11,0.18,1.0]);
+                raster.draw(&h.ctx.tessellate(output.shapes,output.pixels_per_point),output.pixels_per_point);
+                let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+                image::RgbaImage::from_raw(1280,380,rgba).unwrap().save(dest.join(format!("{name}.png"))).unwrap();
+            }
+            raster.free_textures(&output.textures_delta);
+        }
+    };
+    for page in [8usize,9,10] {
+        let mut h=H::new();
+        h.app.settings.visible_pages[page]=true;
+        h.app.timers.set_stand(true,45,9,22,now);
+        h.app.timers.set_smoke(true,90,0,22,now);
+        for k in 0..6i64 {h.app.smoke.add(now-(6-k)*5400);}
+        h.app.timers.items.push(crate::timers::TimerItem{id:"custom-a".into(),title:"起身拉伸".into(),body:String::new(),enabled:true,
+            mode:crate::timers::TimerMode::Interval{minutes:60},start_hour:0,end_hour:0,last_fired:now,fired_on:String::new(),snooze_until:0});
+        h.app.show_page(page);
+        let name=match page{8=>"page-timers",9=>"page-stand",_=>"page-smoke"};
+        shoot(&mut h,name);
+    }
+    // 邮件全文窗口的排版效果。
+    {
+        let mut h=H::new();
+        let body="## 本周周报\n\n本周完成了三件事，明细如下：\n\n• 修复自动获取登录态\n• 同步上游 v0.6.61\n• 重做站立与抽烟的岛上页面\n\n> 注意：周五 18:00 前提交给产品组。\n\n---\n\n如有疑问直接回复这封邮件，谢谢。";
+        let item=crate::mail::Item{received_unix:None,account:"work@example.com".into(),from:"产品团队".into(),subject:"本周周报与下周计划".into(),time:"11-06 09:41".into(),code:None,summary:body.into(),links:vec![crate::mail::Link{label:"查看完整周报".into(),url:"https://example.com/report".into()}],meeting:None,uid:7};
+        h.app.mail.reading=Some(item);
+        h.ctx.set_embed_viewports(true);
+        let mut raster=crate::preview_raster::Raster::new(700,620);
+        for frame in 0..20 {
+            h.t+=1.0/60.0;
+            let out=h.ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,egui::vec2(700.0,620.0))),time:Some(h.t),focused:true,viewports:std::iter::once((egui::ViewportId::ROOT,egui::ViewportInfo{native_pixels_per_point:Some(1.0),..Default::default()})).collect(),..Default::default()},|ctx|h.app.mail_reader_ui(ctx));
+            raster.update_textures(&out.textures_delta);
+            if frame==19 {
+                raster.buf.fill([0.06,0.07,0.09,1.0]);
+                raster.draw(&h.ctx.tessellate(out.shapes,out.pixels_per_point),out.pixels_per_point);
+                let mut rgba=Vec::new();raster.to_rgba8(&mut rgba);
+                image::RgbaImage::from_raw(700,620,rgba).unwrap().save(dest.join("mail-reader.png")).unwrap();
+            }
+            raster.free_textures(&out.textures_delta);
+        }
+    }
+    for (name,id,title,body) in [("notice-stand",crate::timers::STAND_ID,"站立提醒","坐太久了，起来走动一下，看看远处。"),("notice-smoke",crate::timers::SMOKE_ID,"抽烟提醒","到间隔了，先缓一缓，或者只抽半根。")] {
+        let mut h=H::new();
+        h.app.timer_alert(id.into(),title.into(),body.into());
+        shoot(&mut h,name);
+    }
+}

@@ -54,6 +54,8 @@ fn api(agent:&ureq::Agent,session:&Session,path:&str)->Result<Value,Failure>{
     let req=agent.request(if path==SUMMARY{"POST"}else{"GET"},&url)
         .set("User-Agent",&session.ua).set("Cookie",&session.cookie).set("Accept","application/json").set("X-Client-Platform","web");
     let response=if path==SUMMARY{req.set("Content-Type","application/json").send_string("{}")}else{req.call()}.map_err(|e|match e{
+        // 302 会跳到登录页：说明这串 Cookie 已经不被官网认可了。
+        ureq::Error::Status(301|302|303|307|308,_)=>Failure::Expired,
         ureq::Error::Status(401,_)=>Failure::Expired,
         ureq::Error::Status(code,_)=>Failure::Message(format!("WorkBuddy 官网返回 {code}，请稍后重试")),
         _=>Failure::Transport
@@ -214,6 +216,22 @@ pub fn connect_with_cookie(alias:String,header:&str,expected:Option<String>)->Re
                 return Ok(Connected{slot:id,label:if alias.trim().is_empty(){"WorkBuddy".into()}else{alias.trim().into()},snapshot});
             },
             Err(error)=>{if last.is_empty()||!error.contains("暂时无法连接"){last=error;}},
+        }
+    }
+    Err(last)
+}
+/// 轻量校验：只确认这串 Cookie 现在真的能登进官网，不保存、不读积分。
+pub fn probe_cookie(header:&str)->Result<(),String>{
+    let cookie=cookie_header(header)?;
+    let agent=ureq::AgentBuilder::new().try_proxy_from_env(false).timeout(Duration::from_secs(10)).redirects(0).build();
+    let mut last=String::from("官网还没识别到登录状态");
+    for origin in ["https://www.codebuddy.cn","https://www.workbuddy.cn"]{
+        let session=Session{origin:origin.into(),ua:DEFAULT_UA.into(),cookie:cookie.clone()};
+        match api(&agent,&session,"/console/account"){
+            Ok(value)=>if value.pointer("/data/uid").and_then(Value::as_str).is_some_and(|uid|!uid.is_empty()){return Ok(());}else{last="官网还没识别到登录状态".into();},
+            Err(Failure::Expired)=>{},
+            Err(Failure::Transport)=>last="暂时无法连接 WorkBuddy 官网".into(),
+            Err(Failure::Message(message))=>last=message,
         }
     }
     Err(last)

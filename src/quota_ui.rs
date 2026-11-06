@@ -433,7 +433,7 @@ impl App {
                 ui.horizontal(|ui|{
                     if ui.add_enabled(self.quota.workbuddy_login.is_none()&&self.quota.workbuddy_connecting.is_none(),egui::Button::new("自动获取登录态")).clicked(){
                         match crate::browser_login::BrowserLogin::start(){
-                            Ok(login)=>{self.quota.workbuddy_login=Some(login);self.quota.note="已打开专属登录窗口：在里面登录 WorkBuddy，然后关闭窗口，岛仔会自动读取，不用再复制 Cookie".into();},
+                            Ok(login)=>{self.quota.workbuddy_login=Some(login);self.quota.note="已打开专属登录窗口：在里面登录 WorkBuddy，登录成功后岛仔会自动读取，不用复制 Cookie（窗口留着或关掉都行）".into();},
                             Err(error)=>self.quota.note=error,
                         }
                     }
@@ -443,10 +443,11 @@ impl App {
                     }
                     if ui.button("打开官网").clicked(){self.pending.push(Cmd::OpenUrl("https://www.codebuddy.cn/profile/usage".into()));}
                 });
-                if self.quota.workbuddy_login.is_some(){
+                if let Some(login)=self.quota.workbuddy_login.as_ref(){
+                    let hint=login.hint().map(|h|format!("还没读到可用的登录态（{h}），请确认已完成登录")).unwrap_or_else(||"等待登录…登录成功后会自动读取，不用关闭窗口".into());
                     ui.horizontal(|ui|{
                         ui.spinner();
-                        ui.label(egui::RichText::new("等待登录…登录完成后关闭那个窗口即可").size(12.0).color(ui.visuals().weak_text_color()));
+                        ui.label(egui::RichText::new(hint).size(12.0).color(ui.visuals().weak_text_color()));
                         ui.ctx().request_repaint_after(std::time::Duration::from_millis(400));
                     });
                 }

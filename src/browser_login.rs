@@ -10,6 +10,8 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::sync::mpsc;
+use std::time::Duration;
 
 /// 只保留官网登录需要的 Cookie，和 `workbuddy_quota` 里的白名单保持一致。
 const COOKIE_NAMES: [&str; 4] = ["session", "session_2", "cb_login_mode", "cb_login_realm"];
@@ -20,6 +22,10 @@ pub struct BrowserLogin {
     started: i64,
     last_try: i64,
     finished: bool,
+    /// 正在后台验证的候选 Cookie；验证通过才交出去，避免拿到轮换中的旧值。
+    checking: Option<(mpsc::Receiver<Result<(), String>>, String)>,
+    tried: u64,
+    last_error: String,
 }
 
 fn edge_path() -> Option<PathBuf> {
@@ -47,11 +53,15 @@ impl BrowserLogin {
         let edge = edge_path().ok_or_else(|| "没有找到 Microsoft Edge，请先安装，或改用下面的 Cookie 方式连接".to_string())?;
         let profile = profile_dir();
         std::fs::create_dir_all(&profile).map_err(|e| format!("无法创建登录配置目录：{e}"))?;
+        // 上一次的窗口可能只是关了界面、进程还在后台占着这个配置目录；
+        // 那样再启动时 Edge 会把命令转交给旧进程，看起来就像「点了没反应」。
+        end_stale(&profile);
         let child = Command::new(edge)
             .arg(format!("--user-data-dir={}", profile.display()))
             .arg("--no-first-run")
             .arg("--no-default-browser-check")
             .arg("--disable-features=msEdgeSidebarV2")
+            .arg("--new-window")
             .arg("--app=https://www.codebuddy.cn/profile/usage")
             .arg("--window-size=1000,760")
             .spawn()
@@ -62,11 +72,24 @@ impl BrowserLogin {
             started: chrono::Local::now().timestamp(),
             last_try: 0,
             finished: false,
+            checking: None,
+            tried: 0,
+            last_error: String::new(),
         })
+    }
+
+    /// 等待期间给界面看的提示：验证失败时把原因带出来，用户才知道还没登录成功。
+    pub fn hint(&self) -> Option<&str> {
+        (!self.last_error.is_empty()).then_some(self.last_error.as_str())
     }
 
     /// 关闭登录窗口（用户中途取消时调用）。
     pub fn cancel(&mut self) {
+        self.kill_child();
+        self.finished = true;
+    }
+
+    fn kill_child(&mut self) {
         if let Some(mut child) = self.child.take() {
             // Edge 可能还有子进程，按进程树结束，避免留下后台窗口。
             let _ = Command::new("taskkill")
@@ -76,34 +99,74 @@ impl BrowserLogin {
                 .status();
             let _ = child.wait();
         }
-        self.finished = true;
     }
 
-    /// 每两秒试读一次：数据库能读了说明窗口已经关掉，登录态也就落盘了。
+    /// 每两秒试读一次：读到候选 Cookie 先交给后台验证，通过才算完成。
     pub fn poll(&mut self, now: i64) -> Option<Result<String, String>> {
         if self.finished {
             return None;
+        }
+        if let Some((rx, header)) = self.checking.take() {
+            match rx.try_recv() {
+                Ok(Ok(())) => {
+                    self.finished = true;
+                    self.kill_child();
+                    return Some(Ok(header));
+                }
+                Ok(Err(error)) => self.last_error = error,
+                Err(mpsc::TryRecvError::Empty) => {
+                    self.checking = Some((rx, header));
+                    return None;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {}
+            }
         }
         if now - self.last_try < 2 {
             return None;
         }
         self.last_try = now;
+        let exited = self.child.as_mut().and_then(|child| child.try_wait().ok().flatten()).is_some();
         match read_cookie_header(&self.profile) {
             Ok(header) => {
-                self.finished = true;
-                Some(Ok(header))
+                let stamp = cookie_stamp(&header);
+                if stamp == self.tried {
+                    // 还是同一份 Cookie：要么已验证失败正在等新的，要么浏览器还没写盘。
+                    if exited && now - self.started > 3 {
+                        self.finished = true;
+                        self.kill_child();
+                        let detail = if self.last_error.is_empty() { "官网没有认可这份登录态".to_string() } else { self.last_error.clone() };
+                        return Some(Err(format!("{detail}。请重新点「自动获取登录态」并在窗口里完成登录，或改用手动粘贴 Cookie")));
+                    }
+                } else {
+                    self.tried = stamp;
+                    let probe = header.clone();
+                    let (tx, rx) = mpsc::channel();
+                    std::thread::spawn(move || {
+                        let result = crate::quota::workbuddy::probe_cookie(&probe);
+                        let _ = tx.send(result);
+                    });
+                    self.checking = Some((rx, header));
+                    return None;
+                }
+                if now - self.started > 300 {
+                    self.finished = true;
+                    self.kill_child();
+                    return Some(Err("等待登录超时：请重新点「自动获取登录态」，或改用手动粘贴 Cookie".into()));
+                }
+                None
             }
             Err(error) if error.contains("还没有登录记录") || error.contains("还在占用") || error.contains("请稍等") => {
                 // 窗口可能还开着，或者刚启动还没写盘；最多等 5 分钟。
                 if now - self.started > 300 {
                     self.finished = true;
-                    Some(Err("等待登录超时：请重新点「自动获取登录态」，或改用手动粘贴 Cookie".into()))
-                } else {
-                    None
+                    self.kill_child();
+                    return Some(Err("等待登录超时：请重新点「自动获取登录态」，或改用手动粘贴 Cookie".into()));
                 }
+                None
             }
             Err(error) => {
                 self.finished = true;
+                self.kill_child();
                 Some(Err(error))
             }
         }
@@ -118,6 +181,41 @@ impl Drop for BrowserLogin {
             let _ = child.kill();
         }
     }
+}
+
+/// 同一份 Cookie 的指纹，用来避免对同一个值反复验证。
+fn cookie_stamp(header: &str) -> u64 {
+    let mut hash: u64 = 1469598103934665603;
+    for byte in header.bytes() {
+        hash = (hash ^ byte as u64).wrapping_mul(1099511628211);
+    }
+    hash
+}
+
+/// 结束还占着登录配置目录的旧 Edge 进程（只动带我们这个 profile 的进程）。
+fn end_stale(profile: &Path) {
+    for name in ["SingletonLock", "lockfile"] {
+        let Ok(raw) = std::fs::read_to_string(profile.join(name)) else { continue };
+        let Some(pid) = raw.rsplit('-').next().and_then(|s| s.trim().parse::<u32>().ok()) else { continue };
+        if pid == 0 || pid == std::process::id() || !is_edge(pid) {
+            continue;
+        }
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        std::thread::sleep(Duration::from_millis(260));
+    }
+}
+
+/// 锁文件里的 pid 可能已经被系统复用，确认是 Edge 再动手。
+fn is_edge(pid: u32) -> bool {
+    Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).to_ascii_lowercase().contains("msedge.exe"))
+        .unwrap_or(false)
 }
 
 /// 读取专属配置目录里的官网 Cookie，拼成可以直接用的请求头。
@@ -141,8 +239,8 @@ pub(crate) fn read_cookie_header(profile: &Path) -> Result<String, String> {
         if !COOKIE_NAMES.contains(&name.as_str()) {
             continue;
         }
-        let Ok(value) = decrypt_cookie(&key, &encrypted) else { continue };
-        let value = String::from_utf8_lossy(&value).to_string();
+        let Ok(raw) = decrypt_cookie(&key, &encrypted) else { continue };
+        let value = String::from_utf8_lossy(&strip_domain_prefix(&host, raw)).to_string();
         if value.is_empty() || value.contains([';', '\r', '\n']) {
             continue;
         }
@@ -154,6 +252,24 @@ pub(crate) fn read_cookie_header(profile: &Path) -> Result<String, String> {
     kept.sort();
     kept.dedup();
     Ok(kept.join("; "))
+}
+
+/// Chromium 24 起的 Cookie 明文前 32 字节是 `SHA256(host_key)`，用来防止把
+/// 一个站点的密文搬到另一个站点复用。不去掉这 32 字节，值里就会混进一段乱码，
+/// 官网把整条 Cookie 当成无效登录态（表现为扫码登录成功返回 302）。
+fn strip_domain_prefix(host: &str, value: Vec<u8>) -> Vec<u8> {
+    if value.len() <= 32 {
+        return value;
+    }
+    let hash = ring::digest::digest(&ring::digest::SHA256, host.as_bytes());
+    if value[..32] == hash.as_ref()[..32] {
+        return value[32..].to_vec();
+    }
+    // 老版本数据库没有前缀；万一哈希算法对不上，也按「非可打印前缀」兜底剥一层。
+    if !value[..32].iter().all(|b| b.is_ascii_graphic()) {
+        return value[32..].to_vec();
+    }
+    value
 }
 
 fn master_key(profile: &Path) -> Result<Vec<u8>, String> {
@@ -376,4 +492,21 @@ mod tests {
         assert!(decrypt_cookie(&[0u8; 32], b"v20-anything").is_err());
         assert!(decrypt_cookie(&[0u8; 32], b"v10short").is_err());
     }
+
+    /// Chromium 24 起的明文体是 `SHA256(host_key) || 值`，读 Cookie 时必须剥掉，
+    /// 否则 header 里会混进一段二进制乱码，官网直接把登录态判为无效。
+    #[test]
+    fn domain_prefix_is_stripped_by_host_hash() {
+        let host = "www.codebuddy.cn";
+        let hash = ring::digest::digest(&ring::digest::SHA256, host.as_bytes());
+        let mut blob = hash.as_ref().to_vec();
+        blob.extend_from_slice(b"s5F_7iJM|1794539821|sig");
+        assert_eq!(strip_domain_prefix(host, blob), b"s5F_7iJM|1794539821|sig".to_vec());
+
+        // 老数据库没有前缀：值原样返回。
+        assert_eq!(strip_domain_prefix(host, b"plainvalue".to_vec()), b"plainvalue".to_vec());
+        // 长度刚好 32 的短值不剥。
+        assert_eq!(strip_domain_prefix(host, vec![b'a'; 32]).len(), 32);
+    }
 }
+

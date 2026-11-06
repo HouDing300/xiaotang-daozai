@@ -67,7 +67,8 @@ pub(crate) fn notice_badge(c:&Card,x:f32,y:f32,a:&Alert){
     if a.source==AlertSource::Internal && a.title=="蓝牙设备"{
         c.circle(x,y,11.0,if a.body.contains("已断开"){Color32::from_gray(95)}else{theme::BLUE});
         device_icon(c,a.bluetooth.map_or(crate::bt::DeviceKind::Other,|v|v.0),x-7.5,y-7.5,15.0);
-    }else{notice_icon(&c.scaled(x,y,0.85),x,y,a);}
+    }else if a.timer_id.is_some(){notice_icon(c,x,y,a);}
+    else{notice_icon(&c.scaled(x,y,0.85),x,y,a);}
 }
 pub(crate) fn messenger_icon(c:&Card,x:f32,y:f32,source:crate::app::Messenger){
 
@@ -89,8 +90,24 @@ pub(crate) fn messenger_icon(c:&Card,x:f32,y:f32,source:crate::app::Messenger){
         }
     }
 }
+/// 提醒卡片左侧的图标。定时类提醒按来源分成三种：站立小人、点着的烟、普通定时器。
 fn notice_icon(c:&Card,x:f32,y:f32,a:&Alert) {
-    if a.timer_id.is_some(){crate::paint::stopwatch(&c.scaled(x,y,0.65),x,y,8.0,0.0,theme::BLUE);return;}
+    if let Some(id)=a.timer_id.as_deref(){
+        let now=chrono::Local::now().timestamp_millis() as f64/1000.0;
+        let elapsed=((now-a.at).max(0.0)) as f32;
+        match id {
+            crate::timers::STAND_ID=>{
+                c.ui.ctx().request_repaint_after(std::time::Duration::from_millis(80));
+                crate::paint::stand_person(c,x,y,22.0,elapsed,theme::SOFT_GREEN);
+            },
+            crate::timers::SMOKE_ID=>{
+                c.ui.ctx().request_repaint_after(std::time::Duration::from_millis(80));
+                crate::paint::cigarette(c,x,y,25.0,elapsed,true);
+            },
+            _=>crate::paint::stopwatch(&c.scaled(x,y,0.65),x,y,8.0,0.0,theme::BLUE),
+        }
+        return;
+    }
     if a.source!=AlertSource::Internal{crate::paint::bell(c,x,y,theme::WHITE,0.0);return;}
     match a.title.as_str() {
         "系统音量"=>{
@@ -649,6 +666,30 @@ mod tests {
         });
     }
 
+    /// 数值行必须和其它行一样贴着标签列左对齐，不能推到卡片右边。
+    #[test]
+    fn number_rows_left_align_with_other_controls() {
+        let ctx=egui::Context::default();
+        let raw=egui::RawInput{screen_rect:Some(Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(420.0,240.0))),..Default::default()};
+        let output=ctx.run(raw,|ctx|{
+            egui::CentralPanel::default().frame(egui::Frame::new().inner_margin(12)).show(ctx,|ui|{
+                let mut value=45u32;
+                setting_number(ui,"间隔",&mut value,1u32,720u32," 分钟",5.0);
+                let mut other=25u32;
+                setting_number(ui,"时长",&mut other,1u32,180u32," 分钟",1.0);
+            });
+        });
+        let left_of=|needle:&str|output.shapes.iter().find_map(|shape|match &shape.shape{
+            egui::Shape::Text(text) if text.galley.text()==needle=>Some(text.visual_bounding_rect().left()),_=>None});
+        let label=left_of("间隔").expect("应有「间隔」标签");
+        let minus:Vec<f32>=output.shapes.iter().filter_map(|shape|match &shape.shape{
+            egui::Shape::Text(text) if text.galley.text()=="−"=>Some(text.visual_bounding_rect().left()),_=>None}).collect();
+        assert_eq!(minus.len(),2,"两行数值控件各有一个减号");
+        // 两行的减号必须落在同一个 x：右推时会被各自的数值宽度带偏。
+        assert!((minus[0]-minus[1]).abs()<0.5,"两行数值控件必须左缘对齐：{minus:?}");
+        assert!(minus[0]-label<=SETTINGS_LABEL_W+20.0,"数值控件应紧贴标签列左对齐：{}",minus[0]-label);
+    }
+
     #[test]
     fn settings_groups_keep_every_page_reachable() {
         let groups = ["常规", "音乐与歌词", "专注与定时", "专注与定时", "待办与置物", "待办与置物", "通知、邮箱与日程", "通知、邮箱与日程", "通知、邮箱与日程", "关于", "页面管理", "AI 额度", "专注与定时", "专注与定时", "专注与定时"];
@@ -1021,12 +1062,9 @@ pub(crate) fn settings_control_row(ui:&mut egui::Ui,title:&str,label_width:f32,c
 }
 fn setting_number<N:egui::emath::Numeric>(ui:&mut egui::Ui,title:&str,value:&mut N,min:N,max:N,suffix:&str,speed:f64)->bool{
     let mut changed=false;
+    // 和其它行一样贴着标签列往左排，不推到右边，避免同一张卡片里控件左右跳。
     settings_control_row(ui,title,80.0,|ui|{
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center),|ui|{
-            ui.allocate_ui_with_layout(egui::vec2(140.0,30.0),egui::Layout::left_to_right(egui::Align::Center),|ui|{
-                changed=number_stepper(ui,value,min,max,suffix,N::from_f64(speed),76.0);
-            });
-        }).response
+        ui.horizontal(|ui|{changed=number_stepper(ui,value,min,max,suffix,N::from_f64(speed),76.0);}).response
     });
     changed
 }

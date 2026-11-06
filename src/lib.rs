@@ -22,6 +22,7 @@ pub mod icons;
 pub mod input;
 pub mod lyrics;
 pub mod mail;
+pub mod mail_format;
 mod mail_reader;
 pub mod clipboard;
 pub mod side_dock;

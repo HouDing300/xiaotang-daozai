@@ -412,12 +412,12 @@ pub fn parse_message(raw: &[u8]) -> Parsed {
     Parsed { from, subject, text: plain, html, calendar, emphasized }
 }
 
-/// 优先纯文本，HTML 邮件转成文字；保留完整正文与段落。
+/// 优先纯文本，HTML 邮件转成带结构的文字；保留段落、列表和标题层级。
 pub fn body_of(parsed:&Parsed)->String {
     let body = if !parsed.text.trim().is_empty() {
         parsed.text.clone()
     } else if !parsed.html.trim().is_empty() {
-        otp::html_to_text(&parsed.html)
+        otp::html_to_rich_text(&parsed.html)
     } else {
         String::new()
     };
@@ -1243,7 +1243,7 @@ mod tests {
         let parsed=parse_message(&raw("长邮件",&text));
         assert_eq!(body_of(&parsed),text);
         let html=parse_message(b"Content-Type: text/html; charset=utf-8\r\n\r\n<p>First paragraph</p><p>Last paragraph</p>");
-        assert_eq!(body_of(&html),"First paragraph\nLast paragraph");
+        assert_eq!(body_of(&html),"First paragraph\n\nLast paragraph");
     }
 
     const ICS: &str = "BEGIN:VCALENDAR\r\n\

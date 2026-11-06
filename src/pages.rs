@@ -31,15 +31,6 @@ fn big_switch(c: &Card, x: f32, y: f32, on: bool, id: impl std::hash::Hash) -> b
     hit.clicked()
 }
 
-/// 一支烟的小图标：滤嘴 + 烟身 + 两缕烟。
-fn smoke_icon(c: &Card, x: f32, y: f32, lit: bool) {
-    let ink = if lit { theme::YELLOW } else { Color32::from_gray(118) };
-    c.fill(x - 11.0, y - 2.5, 17.0, 5.0, 1.2, ink);
-    c.fill(x + 7.0, y - 2.5, 4.0, 5.0, 1.0, mix(ink, theme::WHITE, 0.35));
-    c.arc(x - 6.0, y - 7.0, 3.0, -2.2, -0.6, 1.2, paint::alpha(ink, 0.55));
-    c.arc(x - 2.0, y - 9.0, 3.2, -2.4, -0.8, 1.2, paint::alpha(ink, 0.38));
-}
-
 /// 剪贴板分栏一屏显示的条数。
 pub(crate) const CLIP_ROWS: usize = 4;
 
@@ -463,10 +454,10 @@ impl App {
         let total = rows.len();
 
         // 左：图标与数字同一条基线，说明只有一行，按钮单独一行。
-        c.glow(50.0, 62.0, 30.0, paint::alpha(theme::YELLOW, 0.10));
-        paint::sliders(&c.scaled(50.0, 61.0, 1.2), 50.0, 61.0, if total > 0 { theme::YELLOW } else { Color32::from_gray(120) });
-        let bw = c.text(70.0, 73.0, &total.to_string(), 24.0, W::Bold, theme::WHITE, H::Left);
-        c.text(70.0 + bw + 4.0, 70.0, "条", 11.5, W::Semibold, theme::GRAY, H::Left);
+        c.glow(60.0, 60.0, 30.0, paint::alpha(theme::YELLOW, 0.10));
+        paint::sliders(&c.scaled(60.0, 59.0, 1.25), 60.0, 59.0, if total > 0 { theme::YELLOW } else { Color32::from_gray(120) });
+        let bw = c.text(90.0, 73.0, &total.to_string(), 24.0, W::Bold, theme::WHITE, H::Left);
+        c.text(90.0 + bw + 4.0, 70.0, "条", 11.5, W::Semibold, theme::GRAY, H::Left);
         let hint = if total == 0 { "还没有自定义提醒".to_string() } else { format!("{enabled}/{total} 条已开启 · 点标题编辑") };
         c.text(44.0, 90.0, &c.fit(&hint, size::SMALL, W::Regular, 138.0), size::SMALL, W::Regular, theme::GRAY, H::Left);
 
@@ -548,12 +539,13 @@ impl App {
             .map(|i| if i.start_hour == i.end_hour { "全天".to_string() } else { format!("{:02}:00–{:02}:00", i.start_hour, i.end_hour) })
             .unwrap_or_else(|| "09:00–22:00".into());
 
-        c.glow(50.0, 60.0, 32.0, paint::alpha(theme::SOFT_GREEN, if enabled { 0.16 } else { 0.05 }));
-        paint::stopwatch(&c.scaled(50.0, 60.0, 1.15), 50.0, 60.0, 9.6, if enabled && crate::bar_layout::animations_enabled() { (self.t as f32 * 1.1) % TAU } else { 0.0 },
-            if enabled { theme::SOFT_GREEN } else { Color32::from_gray(110) });
+        // 左栏栅格：图标左缘、说明、按钮统一对齐到 44；数值从 86 起。
+        let tick = if crate::bar_layout::animations_enabled() { self.t as f32 } else { 0.0 };
+        c.glow(61.0, 63.0, 32.0, paint::alpha(theme::SOFT_GREEN, if enabled { 0.16 } else { 0.05 }));
+        paint::stand_person(c, 61.0, 63.0, 33.0, tick, if enabled { theme::SOFT_GREEN } else { Color32::from_gray(112) });
 
         let big = if enabled { when.clone() } else { "已关闭".into() };
-        c.text(70.0, 73.0, &c.fit(&big, 20.0, W::Bold, 118.0), 20.0, W::Bold, if enabled { theme::SOFT_GREEN } else { theme::GRAY }, H::Left);
+        c.text(90.0, 73.0, &c.fit(&big, 19.0, W::Bold, 98.0), 19.0, W::Bold, if enabled { theme::SOFT_GREEN } else { theme::GRAY }, H::Left);
         c.text(44.0, 90.0, &c.fit(&format!("每 {minutes} 分钟 · {window}"), 10.5, W::Regular, 138.0), 10.5, W::Regular, theme::GRAY, H::Left);
 
         let (set, sc) = capsule(c, 43.0, 99.0, 76.0, 25.0, "stand-set", theme::BTN, theme::BTN_HOVER);
@@ -582,7 +574,6 @@ impl App {
 
     // ================= 抽烟记录 =================
     pub(crate) fn page_smoke(&mut self, c: &Card, env: &Env) {
-        use crate::timers::TimerMode;
         let now = chrono::Local::now().timestamp();
         let hour = env.hour() as u32;
         let minute = env.minute();
@@ -590,21 +581,17 @@ impl App {
         let limit = self.settings.smoke_limit as usize;
         let item = self.timers.smoke().cloned();
         let enabled = item.as_ref().is_some_and(|i| i.enabled);
-        let minutes = match item.as_ref().map(|i| i.mode) {
-            Some(TimerMode::Interval { minutes }) => minutes,
-            _ => 90,
-        };
         let when = item.as_ref().map(|i| i.next_label(now, hour, minute, &env.today)).unwrap_or_else(|| "未开启".into());
         let gap = self.smoke.minutes_since_last(now);
         let over = limit > 0 && today > limit;
 
-        c.glow(50.0, 60.0, 30.0, paint::alpha(theme::YELLOW, if over { 0.24 } else { 0.12 }));
-        smoke_icon(c, 50.0, 58.0, today > 0);
+        c.glow(61.0, 63.0, 32.0, paint::alpha(theme::YELLOW, if over { 0.24 } else { 0.12 }));
+        paint::cigarette(c, 61.0, 63.0, 34.0, if crate::bar_layout::animations_enabled() { self.t as f32 } else { 0.0 }, today > 0);
 
         let color = if over { theme::RED_TOP } else { theme::WHITE };
-        let bw = c.text(70.0, 73.0, &today.to_string(), 24.0, W::Bold, color, H::Left);
+        let bw = c.text(90.0, 73.0, &today.to_string(), 24.0, W::Bold, color, H::Left);
         let unit = if limit > 0 { format!("/ {limit} 根") } else { "根".to_string() };
-        c.text(70.0 + bw + 5.0, 71.0, &unit, 11.5, W::Semibold, theme::GRAY, H::Left);
+        c.text(90.0 + bw + 5.0, 71.0, &unit, 11.5, W::Semibold, theme::GRAY, H::Left);
         let gap_text = match gap {
             Some(mins) if mins < 60 => format!("距上一根 {mins} 分钟"),
             Some(mins) if mins % 60 == 0 => format!("距上一根 {} 小时", mins / 60),
@@ -647,7 +634,7 @@ impl App {
         let base = 104.0;
         let bar_top = 54.0;
         for (index, (label, count)) in days.iter().enumerate() {
-            let x = 210.0 + index as f32 * 22.0;
+            let x = 210.0 + index as f32 * 23.5;
             let h = ((base - bar_top) * (*count as f32 / peak)).max(if *count > 0 { 3.0 } else { 0.0 });
             if *count > 0 {
                 c.fill(x, base - h, 11.0, h, 3.0, if index == 6 { theme::YELLOW } else { mix(theme::YELLOW, Color32::BLACK, 0.45) });
@@ -1211,8 +1198,9 @@ impl App {
         content.style_mut().spacing.scroll.floating=false;
         content.spacing_mut().scroll.bar_width=4.0*c.s;
         egui::ScrollArea::vertical().id_salt(("mail-body",&item.account,item.uid)).max_height(90.0*c.s).auto_shrink([false,false]).show(&mut content,|ui|{
-            if !item.summary.is_empty() {
-                ui.add(egui::Label::new(egui::RichText::new(item.summary.as_ref()).font(c.font(12.0,W::Regular)).color(Color32::from_gray(220))).wrap());
+            let body=crate::mail_format::item_lines(item);
+            if !body.is_empty() {
+                crate::mail_reader::body_ui(ui,&body,11.5);
             }else if item.links.is_empty(){
                 ui.label(egui::RichText::new("（这封邮件没有正文）").font(c.font(12.0,W::Regular)).color(theme::DIM));
             }
