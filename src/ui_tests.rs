@@ -5336,5 +5336,5 @@ fn timer_notice_keeps_its_id_and_opens_the_timers_tab(){
     assert_eq!(h.app.notice.as_ref().and_then(|a|a.timer_id.as_deref()),Some("stand"));
     h.app.open_timers_settings();
     assert!(h.app.settings_open);
-    assert_eq!(h.app.settings_tab,3,"定时提醒内嵌在「专注与定时 → 饮水」子页");
+    assert_eq!(h.app.settings_tab,crate::timers::CUSTOM_TAB,"「定时设置」跳到与专注、饮水并列的自定义定时子页");
 }

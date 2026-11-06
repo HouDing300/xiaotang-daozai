@@ -225,9 +225,9 @@ impl App {
             bluetooth: None, meeting: None, timer_id: Some(id),
         }, true);
     }
-    /// 定时提醒内嵌在「专注与定时 → 饮水」子页。
+    /// 跳到「专注与定时 → 自定义定时」子页。
     pub(crate) fn open_timers_settings(&mut self) {
-        self.settings_tab = 3;
+        self.settings_tab = crate::timers::CUSTOM_TAB;
         self.open_settings();
     }
     pub(crate) fn meeting_alert(&mut self, meeting: crate::mail::Meeting, source: String, page: usize) {
@@ -651,7 +651,7 @@ mod tests {
 
     #[test]
     fn settings_groups_keep_every_page_reachable() {
-        let groups = ["常规", "音乐与歌词", "专注与定时", "专注与定时", "待办与置物", "待办与置物", "通知、邮箱与日程", "通知、邮箱与日程", "通知、邮箱与日程", "关于", "页面管理", "AI 额度"];
+        let groups = ["常规", "音乐与歌词", "专注与定时", "专注与定时", "待办与置物", "待办与置物", "通知、邮箱与日程", "通知、邮箱与日程", "通知、邮箱与日程", "关于", "页面管理", "AI 额度", "专注与定时", "专注与定时"];
         for (tab, expected) in groups.iter().enumerate() {
             let matches: Vec<_> = SETTINGS_GROUPS.iter().filter(|(_,tabs)| tabs.contains(&tab)).collect();
             assert_eq!(matches.len(), 1, "页面 {tab} 必须且只能属于一个分组");
@@ -1066,11 +1066,11 @@ fn pick_data_dir()->Result<Option<String>,String>{
     Err("目录选择仅在 Windows 上可用，请直接输入路径".into())
 }
 
-/// 分组 → 它包含的设置子页编号。定时提醒内嵌在「饮水」子页，
-/// 不新增独立子页，既有编号与页面索引保持不变。
+/// 分组 → 它包含的设置子页编号。「站立提醒」「自定义定时」与专注、饮水并列，
+/// 用显式列表避免挪动既有子页编号与岛内页面索引。
 const SETTINGS_GROUPS: [(&str,&[usize]);8] = [
     ("常规",&[0]), ("页面管理",&[10]), ("音乐与歌词",&[1]),
-    ("专注与定时",&[2,3]),
+    ("专注与定时",&[2,3,crate::timers::STAND_TAB,crate::timers::CUSTOM_TAB]),
     ("待办与置物",&[4,5]), ("通知、邮箱与日程",&[6,7,8]),
     ("AI 额度",&[11]), ("关于",&[9]),
 ];
@@ -1152,8 +1152,8 @@ impl App {
                     }
                 }
                 ui.visuals_mut().selection.bg_fill=settings_color(ctx,Color32::from_rgb(45,105,165),Color32::from_rgb(209,226,248));
-                let titles=["常规","音乐与歌词","专注","饮水","待办","置物","通知","邮箱","日程","关于","页面管理","AI 额度"];
-                ui.label(egui::RichText::new(titles[self.settings_tab.min(11)]).size(18.0).strong().color(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))));
+                let titles=["常规","音乐与歌词","专注","饮水","待办","置物","通知","邮箱","日程","关于","页面管理","AI 额度","站立提醒","自定义定时"];
+                ui.label(egui::RichText::new(titles[self.settings_tab.min(crate::timers::CUSTOM_TAB)]).size(18.0).strong().color(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))));
                 if let Some((_,tabs))=SETTINGS_GROUPS.iter().find(|(_,tabs)|tabs.contains(&self.settings_tab)) {
                     if tabs.len()>1 {
                         ui.add_space(7.0);
@@ -1176,6 +1176,8 @@ impl App {
                     // 右侧给滚动条留出空隙，卡片和开关不会被它压住。
                     ui.set_width((ui.available_width()-12.0).max(240.0));
                     match self.settings_tab {
+                    crate::timers::STAND_TAB=>self.stand_timer_settings(ui),
+                    crate::timers::CUSTOM_TAB=>self.custom_timer_settings(ui),
                     11=>self.quota_settings(ui),
                     10=>{
                         ui.label(egui::RichText::new("选择需要的页面和状态组件。").size(12.0).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
@@ -1378,8 +1380,6 @@ impl App {
                                 }).response
                             });
                         });
-                        self.stand_timer_settings(ui);
-                        self.custom_timer_settings(ui);
                     }
                     4=>{
                         settings_label(ui,"待办清单");
@@ -1787,7 +1787,7 @@ impl App {
 enum TimerAction { None, Save, Cancel }
 
 impl App {
-    /// 「站立提醒」：内置预设，一个开关加间隔/时段，不占用自定义提醒列表。
+    /// 「专注与定时 → 站立提醒」子页：内置预设，一个开关加间隔/时段，不占用自定义提醒列表。
     pub(crate) fn stand_timer_settings(&mut self, ui:&mut egui::Ui) {
         let now=chrono::Local::now().timestamp();
         let current=self.timers.stand().cloned();
@@ -1799,7 +1799,7 @@ impl App {
         let mut start_hour=current.as_ref().map(|i|i.start_hour).unwrap_or(9);
         let mut end_hour=current.as_ref().map(|i|i.end_hour).unwrap_or(22);
         let mut changed=false;
-        settings_label(ui,"站立提醒");
+        settings_label(ui,"提醒设置");
         settings_card(ui,|ui|{
             let was_enabled=enabled;
             setting_row(ui,"久坐提醒","按间隔提醒起身活动，时段之外不打扰",&mut enabled);
@@ -1820,14 +1820,14 @@ impl App {
         }
     }
 
-    /// 「自定义定时提醒」：已有提醒 + 快速模板 + 新增/编辑表单（例如抽烟提醒）。
+    /// 「专注与定时 → 自定义定时」子页：已有提醒 + 快速模板 + 新增/编辑表单（例如抽烟提醒）。
     pub(crate) fn custom_timer_settings(&mut self, ui:&mut egui::Ui) {
         use crate::timers::{TimerForm,STAND_ID};
         // 表单状态放在 App 上，用 take/放回的方式跨帧保留，也避免闭包里同时借用两个字段。
         let mut form=std::mem::take(&mut self.timer_form);
         let mut action=TimerAction::None;
 
-        settings_label(ui,"自定义定时提醒");
+        settings_label(ui,"已添加的提醒");
         settings_hint(ui,"间隔提醒按分钟循环，每日提醒在设定时刻触发一次；都能设置标题、正文和生效时段。");
         let mut edit_pick:Option<String>=None;
         {

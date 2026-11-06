@@ -11,6 +11,9 @@ use std::{fs, path::PathBuf};
 const FILE: &str = "timers.json";
 /// 内置「站立提醒」的固定 id：设置里是独立开关，不算自定义提醒。
 pub const STAND_ID: &str = "stand-preset";
+/// 「专注与定时」分组下与专注(2)、饮水(3)并列的两个子页（0..11 是原有子页）。
+pub const STAND_TAB: usize = 12;
+pub const CUSTOM_TAB: usize = 13;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TimerMode {
