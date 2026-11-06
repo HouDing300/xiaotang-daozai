@@ -20,6 +20,18 @@ fn mini_switch(c: &Card, x: f32, y: f32, on: bool, id: impl std::hash::Hash) -> 
     hit.clicked()
 }
 
+/// 定时列表每一行的水平栅格。开关轨道 208..234（命中区 206..238），
+/// 编辑热区从 242 起、标题从 244 起，状态右对齐到 371 —— 四者互不重叠。
+pub(crate) mod timer_row {
+    pub const SWITCH_X: f32 = 208.0;
+    pub const HIT_X: f32 = 242.0;
+    pub const HIT_W: f32 = 133.0;
+    pub const TITLE_X: f32 = 244.0;
+    pub const TITLE_W: f32 = 72.0;
+    pub const STATUS_X: f32 = 371.0;
+    pub const STATUS_W: f32 = 48.0;
+}
+
 /// 卡片里的大开关（带「开/关」文字）。
 fn big_switch(c: &Card, x: f32, y: f32, on: bool, id: impl std::hash::Hash) -> bool {
     let hit = c.hit(x - 2.0, y - 10.0, 60.0, 20.0, id);
@@ -453,11 +465,13 @@ impl App {
         let enabled = rows.iter().filter(|r| r.2).count();
         let total = rows.len();
 
-        // 左：图标与数字同一条基线，说明只有一行，按钮单独一行。
-        c.glow(60.0, 60.0, 30.0, paint::alpha(theme::YELLOW, 0.10));
-        paint::sliders(&c.scaled(60.0, 59.0, 1.25), 60.0, 59.0, if total > 0 { theme::YELLOW } else { Color32::from_gray(120) });
+        // 左栏与站立/抽烟页共用同一条栅格：glow (61,63)、图标中心 (61,63)、
+        // 数值起点 x=90 基线 y=73。滑块图标放大到 2 倍才和 24pt 数字等量级，
+        // 否则只有数字一半高且偏上，看起来像浮在左上角。
+        c.glow(61.0, 63.0, 32.0, paint::alpha(theme::YELLOW, 0.10));
+        paint::sliders(&c.scaled(61.0, 63.0, 2.0), 61.0, 63.0, if total > 0 { theme::YELLOW } else { Color32::from_gray(120) });
         let bw = c.text(90.0, 73.0, &total.to_string(), 24.0, W::Bold, theme::WHITE, H::Left);
-        c.text(90.0 + bw + 4.0, 70.0, "条", 11.5, W::Semibold, theme::GRAY, H::Left);
+        c.text(90.0 + bw + 4.0, 71.0, "条", 11.5, W::Semibold, theme::GRAY, H::Left);
         let hint = if total == 0 { "还没有自定义提醒".to_string() } else { format!("{enabled}/{total} 条已开启 · 点标题编辑") };
         c.text(44.0, 90.0, &c.fit(&hint, size::SMALL, W::Regular, 138.0), size::SMALL, W::Regular, theme::GRAY, H::Left);
 
@@ -481,18 +495,19 @@ impl App {
             let mut edit: Option<String> = None;
             for (index, (id, title, on, when)) in rows.iter().take(shown).enumerate() {
                 let y = 50.0 + index as f32 * 22.0;
+                use timer_row::*;
                 // 开关单独一块热区，点其它地方才是「进编辑」。
-                if mini_switch(c, 210.0, y, *on, ("timer-switch", id.as_str())) {
+                if mini_switch(c, SWITCH_X, y, *on, ("timer-switch", id.as_str())) {
                     toggle = Some(id.clone());
                 }
-                let row = c.hit(230.0, y - 10.0, 145.0, 20.0, ("timer-row", id.as_str()));
+                let row = c.hit(HIT_X, y - 10.0, HIT_W, 20.0, ("timer-row", id.as_str()));
                 let (hover, _) = c.hover_t(&row);
                 if hover > 0.01 {
-                    c.fill(230.0, y - 10.0, 144.0, 20.0, 7.0, Color32::from_white_alpha((12.0 * hover) as u8));
+                    c.fill(HIT_X, y - 10.0, HIT_W, 20.0, 7.0, Color32::from_white_alpha((12.0 * hover) as u8));
                 }
                 let ink = if *on { theme::WHITE } else { Color32::from_gray(126) };
-                c.text(236.0, y + 4.0, &c.fit(title, size::SMALL, W::Semibold, 78.0), size::SMALL, W::Semibold, ink, H::Left);
-                c.text(371.0, y + 4.0, &c.fit(when, size::TINY, W::Regular, 52.0), size::TINY, W::Regular, if *on { theme::GRAY } else { theme::DIM }, H::Right);
+                c.text(TITLE_X, y + 4.0, &c.fit(title, size::SMALL, W::Semibold, TITLE_W), size::SMALL, W::Semibold, ink, H::Left);
+                c.text(STATUS_X, y + 4.0, &c.fit(when, size::TINY, W::Regular, STATUS_W), size::TINY, W::Regular, if *on { theme::GRAY } else { theme::DIM }, H::Right);
                 if row.clicked() {
                     edit = Some(id.clone());
                 }

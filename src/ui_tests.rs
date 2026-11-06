@@ -5710,3 +5710,15 @@ fn html_mail_body_is_cached_and_hidden_codes_never_leak_from_html(){
     let hidden_again=h.app.mail_body_lines(&h.app.display_mail(&item));
     assert!(std::sync::Arc::ptr_eq(&hidden_lines,&hidden_again),"隐藏邮件不该每帧重解析正文");
 }
+
+#[test]
+fn timer_list_row_layout_keeps_switch_text_and_status_separated(){
+    use crate::pages::timer_row::*;
+    let track_right=SWITCH_X+26.0;
+    let switch_hit_right=SWITCH_X-2.0+32.0;
+    assert!(TITLE_X>=track_right+8.0,"标题起点 {TITLE_X} 不能贴住开关轨道右缘 {track_right}");
+    assert!(HIT_X>=switch_hit_right+2.0,"编辑热区不能压到开关命中区右缘 {switch_hit_right}");
+    assert!(TITLE_X+TITLE_W+6.0<=STATUS_X-STATUS_W,"标题与状态之间至少留 6pt");
+    assert!(HIT_X+HIT_W<=377.0,"编辑热区不能越出右卡片右缘");
+    assert!(TITLE_X>=HIT_X,"标题应落在编辑热区内");
+}
