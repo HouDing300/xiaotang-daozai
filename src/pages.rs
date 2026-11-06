@@ -1,4 +1,4 @@
-//! 五个页面：音乐 → 专注 → 饮水 → 置物 → 待办。
+﻿//! 五个页面：音乐 → 专注 → 饮水 → 置物 → 待办。
 //! 坐标全部是面板局部逻辑点（419×140），文字 y 是基线。
 
 use crate::anim::{self, lerp, smoothstep, Spring};
@@ -9,6 +9,36 @@ use crate::smtc::Transport;
 use crate::theme::{self, size, W};
 use eframe::egui::{self, Color32, Pos2, Rect};
 use std::f32::consts::{FRAC_PI_2, TAU};
+
+/// 列表行左侧的小开关：只有这一小块是热区，点行内其他地方不切换。
+fn mini_switch(c: &Card, x: f32, y: f32, on: bool, id: impl std::hash::Hash) -> bool {
+    let hit = c.hit(x - 2.0, y - 8.0, 32.0, 16.0, id);
+    let (hover, _) = c.hover_t(&hit);
+    let track = if on { theme::GREEN } else { mix(Color32::from_rgb(58, 58, 62), theme::WHITE, hover * 0.12) };
+    c.fill(x, y - 6.0, 26.0, 12.0, 6.0, track);
+    c.circle(if on { x + 19.0 } else { x + 7.0 }, y, 4.6, theme::WHITE);
+    hit.clicked()
+}
+
+/// 卡片里的大开关（带「开/关」文字）。
+fn big_switch(c: &Card, x: f32, y: f32, on: bool, id: impl std::hash::Hash) -> bool {
+    let hit = c.hit(x - 2.0, y - 10.0, 60.0, 20.0, id);
+    let (hover, _) = c.hover_t(&hit);
+    let track = if on { theme::GREEN } else { mix(Color32::from_rgb(58, 58, 62), theme::WHITE, hover * 0.12) };
+    c.fill(x, y - 7.0, 34.0, 14.0, 7.0, track);
+    c.circle(if on { x + 25.0 } else { x + 9.0 }, y, 5.4, theme::WHITE);
+    c.text(x + 42.0, y + 4.0, if on { "已开" } else { "关闭" }, 9.5, W::Semibold, if on { theme::GREEN } else { theme::DIM }, H::Left);
+    hit.clicked()
+}
+
+/// 一支烟的小图标：滤嘴 + 烟身 + 两缕烟。
+fn smoke_icon(c: &Card, x: f32, y: f32, lit: bool) {
+    let ink = if lit { theme::YELLOW } else { Color32::from_gray(118) };
+    c.fill(x - 11.0, y - 2.5, 17.0, 5.0, 1.2, ink);
+    c.fill(x + 7.0, y - 2.5, 4.0, 5.0, 1.0, mix(ink, theme::WHITE, 0.35));
+    c.arc(x - 6.0, y - 7.0, 3.0, -2.2, -0.6, 1.2, paint::alpha(ink, 0.55));
+    c.arc(x - 2.0, y - 9.0, 3.2, -2.4, -0.8, 1.2, paint::alpha(ink, 0.38));
+}
 
 /// 剪贴板分栏一屏显示的条数。
 pub(crate) const CLIP_ROWS: usize = 4;
@@ -418,84 +448,219 @@ impl App {
         }
     }
 
-    // ================= 定时 =================
-    /// 岛上的「定时」页：左边是最近一条提醒的倒计时，右边是提醒列表（可直接开关）。
+    // ================= 自定义定时 =================
+    /// 岛上的自定义提醒页：左边是概况，右边逐条列出，开关和「进编辑」分开。
     pub(crate) fn page_timers(&mut self, c: &Card, env: &Env) {
         let now = chrono::Local::now().timestamp();
         let hour = env.hour() as u32;
         let minute = env.minute();
-        let upcoming = self.timers.upcoming(now, hour, minute, &env.today);
-        let enabled = self.timers.enabled_count();
-        let total = self.timers.items.len();
+        let rows: Vec<(String, String, bool, String)> = self
+            .timers
+            .custom()
+            .map(|i| (i.id.clone(), i.title.clone(), i.enabled, i.next_label(now, hour, minute, &env.today)))
+            .collect();
+        let enabled = rows.iter().filter(|r| r.2).count();
+        let total = rows.len();
 
-        // 左：秒表图标 + 下一条提醒的倒计时
-        let running = upcoming.is_some();
-        let hand = if running && crate::bar_layout::animations_enabled() { (self.t as f32 * 1.1) % TAU } else { 0.0 };
-        c.glow(58.0, 66.0, 36.0, paint::alpha(theme::YELLOW, if running { 0.16 } else { 0.05 }));
-        paint::stopwatch(&c.scaled(58.0, 50.0, 1.2), 58.0, 50.0, 10.5, hand, if running { theme::YELLOW } else { Color32::from_gray(110) });
+        // 左：图标与数字同一条基线，说明只有一行，按钮单独一行。
+        c.glow(50.0, 62.0, 30.0, paint::alpha(theme::YELLOW, 0.10));
+        paint::sliders(&c.scaled(50.0, 61.0, 1.2), 50.0, 61.0, if total > 0 { theme::YELLOW } else { Color32::from_gray(120) });
+        let bw = c.text(70.0, 73.0, &total.to_string(), 24.0, W::Bold, theme::WHITE, H::Left);
+        c.text(70.0 + bw + 4.0, 70.0, "条", 11.5, W::Semibold, theme::GRAY, H::Left);
+        let hint = if total == 0 { "还没有自定义提醒".to_string() } else { format!("{enabled}/{total} 条已开启 · 点标题编辑") };
+        c.text(44.0, 90.0, &c.fit(&hint, size::SMALL, W::Regular, 138.0), size::SMALL, W::Regular, theme::GRAY, H::Left);
 
-        let (big, unit) = match &upcoming {
-            Some(u) if u.secs < 3600 => (((u.secs + 59) / 60).to_string(), "分钟后"),
-            Some(u) => (format!("{}:{:02}", u.secs / 3600, u.secs % 3600 / 60), "小时后"),
-            None => ("—".to_string(), if total == 0 { "还没有提醒" } else { "已全部关闭" }),
-        };
-        let bw = c.text(80.0, 68.0, &big, 25.0, W::Bold, if running { theme::YELLOW } else { theme::GRAY }, H::Left);
-        c.text(80.0 + bw + 3.0, 66.0, unit, 11.0, W::Semibold, theme::GRAY, H::Left);
-        let sub = upcoming.as_ref().map(|u| u.title.as_str()).unwrap_or("点「管理提醒」新建一条");
-        c.text(80.0, 84.0, &c.fit(sub, size::SMALL, W::Regular, 104.0), size::SMALL, W::Regular, theme::WHITE, H::Left);
-        c.text(80.0, 95.0, &format!("{enabled}/{total} 条已开启"), size::TINY, W::Regular, theme::GRAY, H::Left);
+        let (add, ac) = capsule(c, 43.0, 99.0, 96.0, 25.0, "timer-new", theme::BTN, theme::BTN_HOVER);
+        paint::plus(&ac, 58.0, 111.5, 5.4, theme::WHITE, Color32::BLACK);
+        ac.text(70.0, 114.5, "新建提醒", size::BODY, W::Regular, theme::WHITE, H::Left);
+        if add.clicked() {
+            self.timer_form = crate::timers::TimerForm::default();
+            self.open_timers_settings();
+        }
 
-        let (manage, mc) = capsule(c, 43.0, 102.0, 96.0, 25.0, "timer-manage", theme::BTN, theme::BTN_HOVER);
-        paint::sliders(&mc, 58.0, 114.5, theme::WHITE);
-        mc.text(70.0, 117.5, "管理提醒", size::BODY, W::Regular, theme::WHITE, H::Left);
-        if manage.clicked() { self.open_timers_settings(); }
-
-        // 右：提醒列表（最多 3 条，可直接开关）
+        // 右：逐条列出
         c.fill(196.0, 31.0, 181.0, 93.0, 12.0, theme::CARD);
         if total == 0 {
-            paint::stopwatch(c, 286.0, 62.0, 16.0, 0.0, Color32::from_gray(120));
-            c.text(286.0, 92.0, "还没有定时提醒", size::SMALL, W::Regular, theme::GRAY, H::Center);
-            c.text(286.0, 106.0, "在「管理提醒」里加一条", size::TINY, W::Regular, theme::DIM, H::Center);
+            paint::sliders(c, 286.0, 62.0, Color32::from_gray(105));
+            c.text(286.0, 92.0, "还没有自定义提醒", size::SMALL, W::Regular, theme::GRAY, H::Center);
+            c.text(286.0, 106.0, "点「新建提醒」加一条", size::TINY, W::Regular, theme::DIM, H::Center);
         } else {
-            let rows: Vec<(String, String, bool, String)> = self
-                .timers
-                .items
-                .iter()
-                .map(|i| (i.id.clone(), i.title.clone(), i.enabled, i.next_label(now, hour, minute, &env.today)))
-                .collect();
             let shown = rows.len().min(3);
             let mut toggle: Option<String> = None;
-            let mut open = false;
+            let mut edit: Option<String> = None;
             for (index, (id, title, on, when)) in rows.iter().take(shown).enumerate() {
-                let y = 48.0 + index as f32 * 22.0;
-                let row = c.hit(200.0, y - 10.0, 174.0, 20.0, ("timer-row", id.as_str()));
+                let y = 50.0 + index as f32 * 22.0;
+                // 开关单独一块热区，点其它地方才是「进编辑」。
+                if mini_switch(c, 210.0, y, *on, ("timer-switch", id.as_str())) {
+                    toggle = Some(id.clone());
+                }
+                let row = c.hit(230.0, y - 10.0, 145.0, 20.0, ("timer-row", id.as_str()));
                 let (hover, _) = c.hover_t(&row);
                 if hover > 0.01 {
-                    c.fill(201.0, y - 10.0, 172.0, 20.0, 7.0, Color32::from_white_alpha((12.0 * hover) as u8));
+                    c.fill(230.0, y - 10.0, 144.0, 20.0, 7.0, Color32::from_white_alpha((12.0 * hover) as u8));
                 }
-                let dot = if *on { theme::GREEN } else { Color32::from_rgb(70, 70, 76) };
-                c.circle(212.0, y, 4.6, dot);
-                if *on { c.ring(212.0, y, 6.6, 1.0, paint::alpha(theme::GREEN, 0.28)); }
-                let ink = if *on { theme::WHITE } else { Color32::from_gray(130) };
-                c.text(224.0, y + 4.0, &c.fit(title, size::SMALL, W::Semibold, 88.0), size::SMALL, W::Semibold, ink, H::Left);
-                c.text(371.0, y + 4.0, when, size::TINY, W::Regular, if *on { theme::GRAY } else { theme::DIM }, H::Right);
-                if row.clicked() { toggle = Some(id.clone()); }
-                if row.secondary_clicked() { open = true; }
+                let ink = if *on { theme::WHITE } else { Color32::from_gray(126) };
+                c.text(236.0, y + 4.0, &c.fit(title, size::SMALL, W::Semibold, 78.0), size::SMALL, W::Semibold, ink, H::Left);
+                c.text(371.0, y + 4.0, &c.fit(when, size::TINY, W::Regular, 52.0), size::TINY, W::Regular, if *on { theme::GRAY } else { theme::DIM }, H::Right);
+                if row.clicked() {
+                    edit = Some(id.clone());
+                }
             }
             if rows.len() > shown {
-                c.text(371.0, 116.0, &format!("+{} 条", rows.len() - shown), size::TINY, W::Regular, theme::DIM, H::Right);
+                c.text(371.0, 118.0, &format!("+{} 条", rows.len() - shown), size::TINY, W::Regular, theme::DIM, H::Right);
             }
             if let Some(id) = toggle {
                 if let Some(item) = self.timers.items.iter_mut().find(|i| i.id == id) {
                     item.enabled = !item.enabled;
-                    // 重新开启时重置计时基准，避免刚打开就立刻提醒。
                     item.last_fired = 0;
                     item.fired_on.clear();
                     item.snooze_until = 0;
                 }
                 self.timers.save();
             }
-            if open { self.open_timers_settings(); }
+            if let Some(id) = edit {
+                if let Some(item) = self.timers.find(&id) {
+                    self.timer_form = crate::timers::TimerForm::from_item(item);
+                }
+                self.open_timers_settings();
+            }
+        }
+    }
+
+    // ================= 站立提醒 =================
+    pub(crate) fn page_stand(&mut self, c: &Card, env: &Env) {
+        use crate::timers::TimerMode;
+        let now = chrono::Local::now().timestamp();
+        let hour = env.hour() as u32;
+        let minute = env.minute();
+        let item = self.timers.stand().cloned();
+        let enabled = item.as_ref().is_some_and(|i| i.enabled);
+        let minutes = match item.as_ref().map(|i| i.mode) {
+            Some(TimerMode::Interval { minutes }) => minutes,
+            _ => 45,
+        };
+        let when = item
+            .as_ref()
+            .map(|i| i.next_label(now, hour, minute, &env.today))
+            .unwrap_or_else(|| "未开启".into());
+        let window = item
+            .as_ref()
+            .map(|i| if i.start_hour == i.end_hour { "全天".to_string() } else { format!("{:02}:00–{:02}:00", i.start_hour, i.end_hour) })
+            .unwrap_or_else(|| "09:00–22:00".into());
+
+        c.glow(50.0, 60.0, 32.0, paint::alpha(theme::SOFT_GREEN, if enabled { 0.16 } else { 0.05 }));
+        paint::stopwatch(&c.scaled(50.0, 60.0, 1.15), 50.0, 60.0, 9.6, if enabled && crate::bar_layout::animations_enabled() { (self.t as f32 * 1.1) % TAU } else { 0.0 },
+            if enabled { theme::SOFT_GREEN } else { Color32::from_gray(110) });
+
+        let big = if enabled { when.clone() } else { "已关闭".into() };
+        c.text(70.0, 73.0, &c.fit(&big, 20.0, W::Bold, 118.0), 20.0, W::Bold, if enabled { theme::SOFT_GREEN } else { theme::GRAY }, H::Left);
+        c.text(44.0, 90.0, &c.fit(&format!("每 {minutes} 分钟 · {window}"), 10.5, W::Regular, 138.0), 10.5, W::Regular, theme::GRAY, H::Left);
+
+        let (set, sc) = capsule(c, 43.0, 99.0, 76.0, 25.0, "stand-set", theme::BTN, theme::BTN_HOVER);
+        paint::sliders(&sc, 57.0, 111.5, theme::WHITE);
+        sc.text(68.0, 114.5, "设置", size::BODY, W::Regular, theme::WHITE, H::Left);
+        if set.clicked() { self.settings_tab = crate::timers::STAND_TAB; self.open_settings(); }
+
+        // 右侧：大开关 + 当前状态
+        c.fill(196.0, 31.0, 181.0, 93.0, 12.0, theme::CARD);
+        c.text(214.0, 50.0, "久坐提醒", 12.0, W::Semibold, theme::WHITE, H::Left);
+        if big_switch(c, 348.0, 45.0, enabled, "stand-toggle") {
+            let new_value = !enabled;
+            self.timers.set_stand(new_value, minutes, item.as_ref().map(|i| i.start_hour).unwrap_or(9), item.as_ref().map(|i| i.end_hour).unwrap_or(22), now);
+            self.timers.save();
+        }
+        c.fill(208.0, 58.0, 156.0, 1.0, 0.5, Color32::from_rgb(40, 40, 44));
+        c.text(214.0, 76.0, "上次提醒", size::TINY, W::Regular, theme::DIM, H::Left);
+        let last = item.as_ref().filter(|i| i.last_fired > 0).map(|i| {
+            chrono::DateTime::from_timestamp(i.last_fired, 0).map(|t| t.with_timezone(&chrono::Local).format("%H:%M").to_string()).unwrap_or_default()
+        }).unwrap_or_else(|| "—".into());
+        c.text(371.0, 76.0, &last, size::SMALL, W::Semibold, theme::GRAY, H::Right);
+        c.text(214.0, 96.0, "下次提醒", size::TINY, W::Regular, theme::DIM, H::Left);
+        c.text(371.0, 96.0, if enabled { &when } else { "—" }, size::SMALL, W::Semibold, if enabled { theme::WHITE } else { theme::DIM }, H::Right);
+        c.text(214.0, 114.0, if enabled { "到点会弹通知，可稍后 10 分钟" } else { "打开开关后按间隔提醒" }, size::TINY, W::Regular, theme::DIM, H::Left);
+    }
+
+    // ================= 抽烟记录 =================
+    pub(crate) fn page_smoke(&mut self, c: &Card, env: &Env) {
+        use crate::timers::TimerMode;
+        let now = chrono::Local::now().timestamp();
+        let hour = env.hour() as u32;
+        let minute = env.minute();
+        let today = self.smoke.today(&env.today);
+        let limit = self.settings.smoke_limit as usize;
+        let item = self.timers.smoke().cloned();
+        let enabled = item.as_ref().is_some_and(|i| i.enabled);
+        let minutes = match item.as_ref().map(|i| i.mode) {
+            Some(TimerMode::Interval { minutes }) => minutes,
+            _ => 90,
+        };
+        let when = item.as_ref().map(|i| i.next_label(now, hour, minute, &env.today)).unwrap_or_else(|| "未开启".into());
+        let gap = self.smoke.minutes_since_last(now);
+        let over = limit > 0 && today > limit;
+
+        c.glow(50.0, 60.0, 30.0, paint::alpha(theme::YELLOW, if over { 0.24 } else { 0.12 }));
+        smoke_icon(c, 50.0, 58.0, today > 0);
+
+        let color = if over { theme::RED_TOP } else { theme::WHITE };
+        let bw = c.text(70.0, 73.0, &today.to_string(), 24.0, W::Bold, color, H::Left);
+        let unit = if limit > 0 { format!("/ {limit} 根") } else { "根".to_string() };
+        c.text(70.0 + bw + 5.0, 71.0, &unit, 11.5, W::Semibold, theme::GRAY, H::Left);
+        let gap_text = match gap {
+            Some(mins) if mins < 60 => format!("距上一根 {mins} 分钟"),
+            Some(mins) if mins % 60 == 0 => format!("距上一根 {} 小时", mins / 60),
+            Some(mins) => format!("距上一根 {} 小时 {} 分", mins / 60, mins % 60),
+            None => "今天还没记录".to_string(),
+        };
+        let note = if over { "已超过今日上限，缓一缓" } else { gap_text.as_str() };
+        c.text(44.0, 90.0, &c.fit(note, size::SMALL, W::Regular, 138.0), size::SMALL, W::Regular, if over { theme::RED_TOP } else { theme::GRAY }, H::Left);
+
+        let (add, ac) = capsule(c, 43.0, 99.0, 84.0, 25.0, "smoke-add", theme::BTN, theme::BTN_HOVER);
+        paint::plus(&ac, 57.0, 111.5, 5.4, theme::WHITE, Color32::BLACK);
+        ac.text(68.0, 114.5, "抽了一根", size::BODY, W::Regular, theme::WHITE, H::Left);
+        if add.clicked() {
+            self.smoke.add(now);
+            self.smoke.save();
+            self.say(format!("已记录，今天第 {} 根", self.smoke.today(&env.today)));
+            // 记完一根就从现在重新计时，避免马上又提醒。
+            if enabled {
+                if let Some(item) = self.timers.items.iter_mut().find(|i| i.id == crate::timers::SMOKE_ID) {
+                    item.last_fired = now;
+                    item.snooze_until = 0;
+                }
+                self.timers.save();
+            }
+        }
+        if self.smoke.today(&env.today) > 0 {
+            let (undo, uc) = capsule(c, 133.0, 99.0, 58.0, 25.0, "smoke-undo", theme::BTN, theme::BTN_HOVER);
+            uc.text(162.0, 114.5, "撤销", size::SMALL, W::Regular, theme::WHITE, H::Center);
+            if undo.clicked() {
+                self.smoke.undo();
+                self.smoke.save();
+                self.say("已撤销最近一条记录");
+            }
+        }
+
+        // 右侧：近 7 天柱状 + 下次提醒
+        c.fill(196.0, 31.0, 181.0, 93.0, 12.0, theme::CARD);
+        let days = self.smoke.recent_days(&env.today, 7);
+        let peak = days.iter().map(|d| d.1).max().unwrap_or(0).max(1) as f32;
+        let base = 104.0;
+        let bar_top = 54.0;
+        for (index, (label, count)) in days.iter().enumerate() {
+            let x = 210.0 + index as f32 * 22.0;
+            let h = ((base - bar_top) * (*count as f32 / peak)).max(if *count > 0 { 3.0 } else { 0.0 });
+            if *count > 0 {
+                c.fill(x, base - h, 11.0, h, 3.0, if index == 6 { theme::YELLOW } else { mix(theme::YELLOW, Color32::BLACK, 0.45) });
+            } else {
+                c.fill(x, base - 2.0, 11.0, 2.0, 1.0, Color32::from_rgb(44, 44, 48));
+            }
+            if index % 2 == 0 {
+                c.text(x + 5.5, 116.0, &label[3..], 8.0, W::Regular, theme::DIM, H::Center);
+            }
+        }
+        c.text(214.0, 44.0, "近 7 天", size::TINY, W::Regular, theme::DIM, H::Left);
+        if enabled {
+            c.text(371.0, 44.0, &c.fit(&format!("下次 {when}"), size::TINY, W::Regular, 106.0), size::TINY, W::Regular, theme::YELLOW, H::Right);
         }
     }
 

@@ -1,4 +1,4 @@
-//! 设置、通知队列与岛仔表情。
+﻿//! 设置、通知队列与岛仔表情。
 use crate::settings_theme::color as settings_color;
 use crate::app::{App, Cmd, Phase, HUD_TRACK_W, HUD_TRACK_X, HUD_W, PAGE_NAMES};
 use crate::paint::{Card, H};
@@ -651,7 +651,7 @@ mod tests {
 
     #[test]
     fn settings_groups_keep_every_page_reachable() {
-        let groups = ["常规", "音乐与歌词", "专注与定时", "专注与定时", "待办与置物", "待办与置物", "通知、邮箱与日程", "通知、邮箱与日程", "通知、邮箱与日程", "关于", "页面管理", "AI 额度", "专注与定时", "专注与定时"];
+        let groups = ["常规", "音乐与歌词", "专注与定时", "专注与定时", "待办与置物", "待办与置物", "通知、邮箱与日程", "通知、邮箱与日程", "通知、邮箱与日程", "关于", "页面管理", "AI 额度", "专注与定时", "专注与定时", "专注与定时"];
         for (tab, expected) in groups.iter().enumerate() {
             let matches: Vec<_> = SETTINGS_GROUPS.iter().filter(|(_,tabs)| tabs.contains(&tab)).collect();
             assert_eq!(matches.len(), 1, "页面 {tab} 必须且只能属于一个分组");
@@ -1068,9 +1068,19 @@ fn pick_data_dir()->Result<Option<String>,String>{
 
 /// 分组 → 它包含的设置子页编号。「站立提醒」「自定义定时」与专注、饮水并列，
 /// 用显式列表避免挪动既有子页编号与岛内页面索引。
+/// 分组标签栏用短名，避免长标题把设置窗口撑宽；页面标题仍用全称。
+fn chip_label(title: &str) -> &str {
+    match title {
+        "站立提醒" => "站立",
+        "抽烟提醒" => "抽烟",
+        "自定义定时" => "自定义",
+        other => other,
+    }
+}
+
 const SETTINGS_GROUPS: [(&str,&[usize]);8] = [
     ("常规",&[0]), ("页面管理",&[10]), ("音乐与歌词",&[1]),
-    ("专注与定时",&[2,3,crate::timers::STAND_TAB,crate::timers::CUSTOM_TAB]),
+    ("专注与定时",&[2,3,crate::timers::STAND_TAB,crate::timers::SMOKE_TAB,crate::timers::CUSTOM_TAB]),
     ("待办与置物",&[4,5]), ("通知、邮箱与日程",&[6,7,8]),
     ("AI 额度",&[11]), ("关于",&[9]),
 ];
@@ -1152,17 +1162,18 @@ impl App {
                     }
                 }
                 ui.visuals_mut().selection.bg_fill=settings_color(ctx,Color32::from_rgb(45,105,165),Color32::from_rgb(209,226,248));
-                let titles=["常规","音乐与歌词","专注","饮水","待办","置物","通知","邮箱","日程","关于","页面管理","AI 额度","站立提醒","自定义定时"];
+                let titles=["常规","音乐与歌词","专注","饮水","待办","置物","通知","邮箱","日程","关于","页面管理","AI 额度","站立提醒","抽烟提醒","自定义定时"];
                 ui.label(egui::RichText::new(titles[self.settings_tab.min(crate::timers::CUSTOM_TAB)]).size(18.0).strong().color(settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))));
                 if let Some((_,tabs))=SETTINGS_GROUPS.iter().find(|(_,tabs)|tabs.contains(&self.settings_tab)) {
                     if tabs.len()>1 {
                         ui.add_space(7.0);
                         egui::Frame::new().fill(settings_color(ctx,Color32::from_rgb(33,33,36),Color32::from_rgb(232,235,240))).corner_radius(8.0).inner_margin(3).show(ui,|ui|{
-                            ui.spacing_mut().item_spacing.x=2.0;
-                            ui.horizontal(|ui|{
+                            ui.spacing_mut().item_spacing=egui::vec2(2.0,3.0);
+                            // 分组内子页多于 4 个时换行，避免撑宽内容区把右侧对齐挤乱。
+                            ui.horizontal_wrapped(|ui|{
                                 for index in tabs.iter().copied() {
                                     let selected=self.settings_tab==index;
-                                    let button=egui::Button::new(egui::RichText::new(titles[index]).size(12.0).color(if selected{settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))}else{settings_color(ctx,Color32::from_gray(210),Color32::from_gray(55))}))
+                                    let button=egui::Button::new(egui::RichText::new(chip_label(titles[index])).size(12.0).color(if selected{settings_color(ctx,Color32::WHITE,Color32::from_rgb(30,34,41))}else{settings_color(ctx,Color32::from_gray(210),Color32::from_gray(55))}))
                                         .fill(if selected{settings_color(ctx,Color32::from_rgb(70,70,74),Color32::from_rgb(205,215,229))}else{Color32::TRANSPARENT})
                                         .stroke(egui::Stroke::NONE).corner_radius(6.0);
                                     if ui.add_sized([68.0,26.0],button).clicked(){self.settings_tab=index;}
@@ -1172,11 +1183,14 @@ impl App {
                     }
                 }
                 ui.add_space(6.0);
+                // 先按外层宽度算好内容宽度：滚动条是否出现都不该改变左右对齐。
+                let content_width=(ui.available_width()-12.0).max(240.0);
                 egui::ScrollArea::vertical().id_salt(("settings-scroll",self.settings_tab)).auto_shrink([false,false]).show(ui,|ui|{
                     // 右侧给滚动条留出空隙，卡片和开关不会被它压住。
-                    ui.set_width((ui.available_width()-12.0).max(240.0));
+                    ui.set_width(content_width);
                     match self.settings_tab {
                     crate::timers::STAND_TAB=>self.stand_timer_settings(ui),
+                    crate::timers::SMOKE_TAB=>self.smoke_timer_settings(ui),
                     crate::timers::CUSTOM_TAB=>self.custom_timer_settings(ui),
                     11=>self.quota_settings(ui),
                     10=>{
@@ -1191,7 +1205,7 @@ impl App {
                         });
                         settings_label(ui,"功能页面");
                         settings_card(ui,|ui|{
-                            let descriptions=["播放控制与同步歌词","番茄钟与休息计时","饮水记录与提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程","站立提醒与自定义定时"];
+                            let descriptions=["播放控制与同步歌词","番茄钟与休息计时","饮水记录与提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程","自定义定时列表","久坐站立提醒","抽烟记录与每日根数"];
                             ui.label(egui::RichText::new("拖动左侧手柄调整顺序，松开后自动应用到岛。").size(11.5).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                             #[derive(Clone)]
                             struct PageDrag(usize);
@@ -1822,8 +1836,106 @@ impl App {
     }
 
     /// 「专注与定时 → 自定义定时」子页：已有提醒 + 快速模板 + 新增/编辑表单（例如抽烟提醒）。
+    /// 「专注与定时 → 抽烟提醒」：提醒间隔 + 每日上限 + 今日记录与近 7 天趋势。
+    pub(crate) fn smoke_timer_settings(&mut self, ui:&mut egui::Ui) {
+        use crate::timers::TimerMode;
+        let now=chrono::Local::now().timestamp();
+        let today=chrono::Local::now().format("%Y-%m-%d").to_string();
+        let current=self.timers.smoke().cloned();
+        let mut enabled=current.as_ref().is_some_and(|i|i.enabled);
+        let mut minutes=match current.as_ref().map(|i|i.mode){
+            Some(TimerMode::Interval{minutes})=>minutes,
+            _=>90,
+        };
+        let mut start_hour=current.as_ref().map(|i|i.start_hour).unwrap_or(9);
+        let mut end_hour=current.as_ref().map(|i|i.end_hour).unwrap_or(22);
+        let mut limit=self.settings.smoke_limit;
+        let mut changed=false;
+
+        settings_label(ui,"提醒设置");
+        settings_card(ui,|ui|{
+            let was=enabled;
+            setting_row(ui,"抽烟提醒","到间隔提醒缓一缓；记一根后重新计时",&mut enabled);
+            changed|=enabled!=was;
+            ui.separator();
+            changed|=setting_number(ui,"提醒间隔",&mut minutes,1u32,720u32," 分钟",5.0);
+            settings_control_row_right(ui,"生效时段",|ui|{
+                changed|=ui.add(egui::DragValue::new(&mut start_hour).range(0..=24).speed(1.0).suffix(" 时")).changed();
+                ui.label("至");
+                changed|=ui.add(egui::DragValue::new(&mut end_hour).range(0..=24).speed(1.0).suffix(" 时")).changed();
+                ui.label(egui::RichText::new("相同 = 全天").size(11.0).color(ui.visuals().weak_text_color()));
+            });
+            ui.separator();
+            changed|=setting_number(ui,"每日上限",&mut limit,0u32,100u32," 根",1.0);
+            settings_hint(ui,"0 表示不限制。超过上限时岛上数字变红，但不会阻止你记录。");
+        });
+        if changed {
+            // 只在真的改动时写回，避免每帧重置计时基准。
+            self.timers.set_smoke(enabled,minutes,start_hour,end_hour,now);
+            self.timers.save();
+        }
+        if limit!=self.settings.smoke_limit {self.settings.smoke_limit=limit;}
+
+        settings_label(ui,"今天的记录");
+        settings_card(ui,|ui|{
+            let count=self.smoke.today(&today);
+            ui.horizontal(|ui|{
+                ui.label(egui::RichText::new(format!("{count}")).size(30.0).strong().color(if self.settings.smoke_limit>0&&count>self.settings.smoke_limit as usize{Color32::from_rgb(240,110,110)}else{Color32::WHITE}));
+                ui.label(egui::RichText::new("根").size(12.0).color(ui.visuals().weak_text_color()));
+                ui.add_space(10.0);
+                let gap=match self.smoke.minutes_since_last(now){
+                    Some(mins) if mins<60=>format!("距上一根 {mins} 分钟"),
+                    Some(mins)=>format!("距上一根 {} 小时 {} 分",mins/60,mins%60),
+                    None=>"今天还没记录".to_string(),
+                };
+                ui.label(egui::RichText::new(gap).size(12.0).color(ui.visuals().weak_text_color()));
+                if let Some(avg)=self.smoke.today_average_gap(&today){
+                    ui.label(egui::RichText::new(format!("平均 {} 分钟一根",avg)).size(12.0).color(ui.visuals().weak_text_color()));
+                }
+            });
+            ui.add_space(6.0);
+            ui.horizontal(|ui|{
+                if ui.add_sized([96.0,28.0],egui::Button::new("抽了一根")).clicked(){
+                    self.smoke.add(now);
+                    self.smoke.save();
+                    self.say(format!("已记录，今天第 {} 根",self.smoke.today(&today)));
+                    if enabled {
+                        if let Some(item)=self.timers.items.iter_mut().find(|i|i.id==crate::timers::SMOKE_ID){item.last_fired=now;item.snooze_until=0;}
+                        self.timers.save();
+                    }
+                }
+                if ui.add_enabled(self.smoke.total()>0,egui::Button::new("撤销上一根")).clicked(){
+                    self.smoke.undo();
+                    self.smoke.save();
+                    self.say("已撤销最近一条记录");
+                }
+            });
+            ui.add_space(8.0);
+            let days=self.smoke.recent_days(&today,7);
+            let peak=days.iter().map(|d|d.1).max().unwrap_or(0).max(1) as f32;
+            let width=ui.available_width().min(360.0);
+            let (rect,_)=ui.allocate_exact_size(egui::vec2(width,64.0),egui::Sense::hover());
+            let painter=ui.painter_at(rect);
+            let each=rect.width()/7.0;
+            let weak=ui.visuals().weak_text_color();
+            for (index,(label,count)) in days.iter().enumerate(){
+                let h=(rect.height()-18.0)*(*count as f32/peak);
+                let bar_width=(each-10.0).max(6.0);
+                let x=rect.left()+index as f32*each+(each-bar_width)/2.0;
+                let color=if index==6{theme::YELLOW}else{theme::YELLOW.gamma_multiply(0.5)};
+                if *count>0 {
+                    painter.rect_filled(egui::Rect::from_min_size(egui::pos2(x,rect.bottom()-16.0-h),egui::vec2(bar_width,h.max(3.0))),3.0,color);
+                } else {
+                    painter.rect_filled(egui::Rect::from_min_size(egui::pos2(x,rect.bottom()-17.0),egui::vec2(bar_width,2.0)),1.0,Color32::from_gray(60));
+                }
+                painter.text(egui::pos2(x+bar_width/2.0,rect.bottom()-2.0),egui::Align2::CENTER_BOTTOM,label,egui::FontId::proportional(9.0),weak);
+            }
+            settings_hint(ui,"记录只保存在本机，用来回看自己的节奏；不联网、不上传。");
+        });
+    }
+
     pub(crate) fn custom_timer_settings(&mut self, ui:&mut egui::Ui) {
-        use crate::timers::{TimerForm,STAND_ID};
+        use crate::timers::TimerForm;
         // 表单状态放在 App 上，用 take/放回的方式跨帧保留，也避免闭包里同时借用两个字段。
         let mut form=std::mem::take(&mut self.timer_form);
         let mut action=TimerAction::None;
@@ -1834,10 +1946,10 @@ impl App {
         {
             let timers=&mut self.timers;
             settings_card(ui,|ui|{
-                if !timers.items.iter().any(|i|i.id!=STAND_ID){settings_hint(ui,"还没有自定义提醒，可用下方的模板快速添加。");}
+                if timers.custom().next().is_none(){settings_hint(ui,"还没有自定义提醒，在下方填写标题即可新增。站立、抽烟提醒在各自的子页里单独设置。");}
                 let mut changed=false;
                 let mut remove:Option<String>=None;
-                for item in timers.items.iter_mut().filter(|i|i.id!=STAND_ID){
+                for item in timers.items.iter_mut().filter(|i|i.id!=crate::timers::STAND_ID&&i.id!=crate::timers::SMOKE_ID){
                     let id=item.id.clone();
                     ui.push_id(&id,|ui|{
                         ui.horizontal(|ui|{
@@ -1860,14 +1972,7 @@ impl App {
         }
 
         settings_label(ui,if form.editing.is_some(){"编辑定时提醒"}else{"新增定时提醒"});
-        let mut preset_smoke=false;
         settings_card(ui,|ui|{
-            if form.editing.is_none(){
-                ui.horizontal(|ui|{
-                    ui.label(egui::RichText::new("快速添加").size(11.5));
-                    if ui.button("抽烟提醒").clicked(){preset_smoke=true;}
-                });
-            }
             settings_control_row(ui,"标题",80.0,|ui|{
                 ui.add_sized([ui.available_width().min(340.0),28.0],egui::TextEdit::singleline(&mut form.title).hint_text("例如：抽烟提醒"))
             });
@@ -1901,7 +2006,6 @@ impl App {
             }
         });
 
-        if preset_smoke {form=TimerForm::preset_smoke();}
 
         match action {
             TimerAction::Save=>{

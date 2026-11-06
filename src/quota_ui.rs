@@ -1,4 +1,4 @@
-//! 同心额度环、账号选择及账号设置。
+﻿//! 同心额度环、账号选择及账号设置。
 use crate::{app::{App,Cmd},extras::{setting_row,settings_card,settings_control_row},paint::{Card,H},quota::{self,Accent,Account,Config,Provider,Snapshot},theme::{self,W}};
 use eframe::egui::{self,Color32};
 use std::collections::{HashMap,HashSet};
@@ -12,6 +12,7 @@ pub(crate) struct State {
     pub connect_open:bool,pub connect_target:Option<String>,
     pub login:Option<quota::grok::Login>,
     pub workbuddy_connecting:Option<quota::workbuddy::Connect>,pub workbuddy_cookie:String,
+    pub workbuddy_login:Option<crate::browser_login::BrowserLogin>,
     pub deepseek_connecting:Option<quota::deepseek::Connect>,pub deepseek_key:String,
     pub stale:HashMap<String,String>,
     pub gemini_connecting:Option<quota::gemini::Connect>,pub gemini_email:String,pub gemini_cookie:String,
@@ -174,6 +175,18 @@ fn reset_text(at:Option<i64>,now:&chrono::DateTime<chrono::Local>)->String {
 }
 impl App {
     pub(crate) fn quota_tick(&mut self){
+        if let Some(result)=self.quota.workbuddy_login.as_mut().and_then(|login|login.poll(chrono::Local::now().timestamp())){
+            self.quota.workbuddy_login=None;
+            match result{
+                Ok(cookie)=>{
+                    let expected=self.quota.connect_target.as_ref().and_then(|id|self.quota.config.accounts.iter().find(|a|&a.id==id)).and_then(|a|a.slot.clone());
+                    self.quota.workbuddy_cookie=cookie.clone();
+                    self.quota.note="已读取登录态，正在验证积分…".into();
+                    self.quota.workbuddy_connecting=Some(quota::workbuddy::Connect::start_with_cookie(self.quota.alias.clone(),cookie,expected));
+                },
+                Err(error)=>self.quota.note=error,
+            }
+        }
         if let Some(result)=self.quota.workbuddy_connecting.as_ref().and_then(|c|c.poll()){
             self.quota.workbuddy_connecting=None;
             match result{Ok(connected)=>{
@@ -418,13 +431,27 @@ impl App {
             if self.quota.provider==Provider::WorkBuddy{
                 ui.label("连接官网个人账号，查看剩余积分。");
                 ui.horizontal(|ui|{
-                    if ui.button("打开官网用量页").clicked(){self.pending.push(Cmd::OpenUrl("https://www.codebuddy.cn/profile/usage".into()));}
-                    if ui.add_enabled(self.quota.workbuddy_connecting.is_none(),egui::Button::new("连接当前浏览器")).clicked(){
-                        let expected=self.quota.connect_target.as_ref().and_then(|id|self.quota.config.accounts.iter().find(|a|&a.id==id)).and_then(|a|a.slot.clone());self.quota.note.clear();self.quota.workbuddy_connecting=Some(quota::workbuddy::Connect::start(self.quota.alias.clone(),expected));
+                    if ui.add_enabled(self.quota.workbuddy_login.is_none()&&self.quota.workbuddy_connecting.is_none(),egui::Button::new("自动获取登录态")).clicked(){
+                        match crate::browser_login::BrowserLogin::start(){
+                            Ok(login)=>{self.quota.workbuddy_login=Some(login);self.quota.note="已打开专属登录窗口：在里面登录 WorkBuddy，然后关闭窗口，岛仔会自动读取，不用再复制 Cookie".into();},
+                            Err(error)=>self.quota.note=error,
+                        }
                     }
+                    if self.quota.workbuddy_login.is_some()&&ui.button("取消").clicked(){
+                        if let Some(mut login)=self.quota.workbuddy_login.take(){login.cancel();}
+                        self.quota.note="已取消自动获取".into();
+                    }
+                    if ui.button("打开官网").clicked(){self.pending.push(Cmd::OpenUrl("https://www.codebuddy.cn/profile/usage".into()));}
                 });
-                ui.label(egui::RichText::new("「连接当前浏览器」需要本机装有浏览器连接服务（第三方扩展）；没有装时用下面的 Cookie 方式，一样能连。").size(12.0).color(ui.visuals().weak_text_color()));
-                egui::CollapsingHeader::new("使用 Cookie 连接（无需浏览器扩展，推荐）").default_open(true).show(ui,|ui|{
+                if self.quota.workbuddy_login.is_some(){
+                    ui.horizontal(|ui|{
+                        ui.spinner();
+                        ui.label(egui::RichText::new("等待登录…登录完成后关闭那个窗口即可").size(12.0).color(ui.visuals().weak_text_color()));
+                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(400));
+                    });
+                }
+                ui.add(egui::Label::new(egui::RichText::new("自动获取会用独立配置的 Edge 窗口打开官网，不读取你日常浏览器的 Cookie，也不改动它；登录一次后，后续刷新都用本机保存的会话。").size(11.0).color(ui.visuals().weak_text_color())).wrap());
+                egui::CollapsingHeader::new("手动粘贴 Cookie（没有 Edge 时可用）").default_open(false).show(ui,|ui|{
                     ui.add(egui::Label::new(egui::RichText::new("在已登录的官网用量页按 F12 → 网络（Network）→ 刷新 → 点任一官网请求 → 复制请求头里的 Cookie。嫌麻烦的话，只复制 session 这一条的值也可以。").size(12.0)).wrap());
                     ui.add_sized([ui.available_width(),27.0],egui::TextEdit::singleline(&mut self.quota.workbuddy_cookie).vertical_align(egui::Align::Center).password(true).hint_text("粘贴 Cookie 请求头，或只粘贴 session 的值"));
                     ui.horizontal(|ui|{
@@ -435,7 +462,15 @@ impl App {
                         }
                         if ui.button("打开官网用量页").clicked(){self.pending.push(Cmd::OpenUrl("https://www.codebuddy.cn/profile/usage".into()));}
                     });
-                    ui.add(egui::Label::new(egui::RichText::new("只保留 session 等 4 个登录 Cookie，其余站点凭据会被丢弃；会话用 Windows DPAPI 加密后存在本机，只会发回 WorkBuddy 官网，不会上传到别处。登录态通常 30 天有效，过期后这里会提示重新粘贴。").size(11.0).color(ui.visuals().weak_text_color())).wrap());
+                    ui.add(egui::Label::new(egui::RichText::new("只保留 session 等 4 个登录 Cookie，其余站点凭据会被丢弃；会话用 Windows DPAPI 加密后存在本机，只会发回 WorkBuddy 官网，不会上传到别处。登录态通常 30 天有效，过期后这里会提示重新获取。").size(11.0).color(ui.visuals().weak_text_color())).wrap());
+                });
+                egui::CollapsingHeader::new("用浏览器扩展连接（需已安装桥接）").default_open(false).show(ui,|ui|{
+                    ui.add(egui::Label::new(egui::RichText::new("依赖本机 127.0.0.1:10086 的浏览器连接服务，多数机器没有装，装了才用得上。").size(11.0)).wrap());
+                    if ui.add_enabled(self.quota.workbuddy_connecting.is_none(),egui::Button::new("连接当前浏览器")).clicked(){
+                        let expected=self.quota.connect_target.as_ref().and_then(|id|self.quota.config.accounts.iter().find(|a|&a.id==id)).and_then(|a|a.slot.clone());
+                        self.quota.note.clear();
+                        self.quota.workbuddy_connecting=Some(quota::workbuddy::Connect::start(self.quota.alias.clone(),expected));
+                    }
                 });
                 if self.quota.workbuddy_connecting.is_some(){ui.spinner();ui.label("正在验证积分…");ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));}
             }else if self.quota.provider==Provider::DeepSeek{

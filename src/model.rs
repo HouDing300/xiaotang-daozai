@@ -125,6 +125,7 @@ pub const DATA_ENTRIES: &[&str] = &[
     "water-extra.txt",
     "shelf.txt",
     "timers.json",
+    "smoke.json",
     "notification-apps.json",
     "mail-accounts.json",
     "calendar.json",
@@ -398,8 +399,8 @@ pub struct Settings {
     pub browser_minimal: bool,
     pub avoid_browsers: bool,
     pub avoid_apps: Vec<(String,String)>,
-    pub visible_pages: [bool; 9],
-    pub page_order: [usize; 9],
+    pub visible_pages: [bool; 11],
+    pub page_order: [usize; 11],
     pub show_battery: bool,
     pub clock_12h: bool,
     pub clock_period: u8,
@@ -424,6 +425,8 @@ pub struct Settings {
     pub serving_ml: u32,
     pub water_start: u32,
     pub water_end: u32,
+    /// 抽烟提醒的每日上限，0 表示不限制。
+    pub smoke_limit: u32,
     /// v0.5.5 邮件提醒：总开关、验证码高亮、轮询间隔（秒）、会议提前量（分钟）。
     pub mail_enabled: bool,
     pub mail_code: bool,
@@ -441,7 +444,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 9], page_order: [0,1,2,3,4,5,6,7,8], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wechat_tray_open:false, qq_only:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true }
+        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 11], page_order: [0,1,2,3,4,5,6,7,8,9,10], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wechat_tray_open:false, qq_only:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, smoke_limit: 0, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true }
     }
 }
 
@@ -496,9 +499,11 @@ impl Settings {
                 }
                 "page_order" => {
                     if let Ok(mut order)=v.split(',').map(str::parse::<usize>).collect::<Result<Vec<_>,_>>() {
-                        // 兼容旧版 8 项顺序：新增的「定时」页排在最后。
-                        if order.len()==8 && (0..8).all(|page|order.contains(&page)) { order.push(8); }
-                        if order.len()==9 && (0..9).all(|page|order.contains(&page)) {
+                        // 兼容旧版顺序：后来新增的页面依次补在最后。
+                        if order.len()<11 && order.iter().all(|page|*page<order.len()) {
+                            for page in order.len()..11 { order.push(page); }
+                        }
+                        if order.len()==11 && (0..11).all(|page|order.contains(&page)) {
                             s.page_order.copy_from_slice(&order);
                         }
                     }
@@ -506,7 +511,7 @@ impl Settings {
                 "clock_period" => s.clock_period = v.parse::<u8>().ok().filter(|v|*v<=2).unwrap_or(0),
                 "clock_12h" => s.clock_12h = v == "1",
                 "show_battery" => s.show_battery = v != "0",
-                "visible_pages" if (6..=9).contains(&v.len()) && v.bytes().all(|b| b==b'0' || b==b'1') => {
+                "visible_pages" if (6..=11).contains(&v.len()) && v.bytes().all(|b| b==b'0' || b==b'1') => {
                     for (enabled,value) in s.visible_pages.iter_mut().zip(v.bytes()) { *enabled=value==b'1'; }
                     for enabled in &mut s.visible_pages[v.len()..]{*enabled=v.bytes().any(|b|b==b'1');}
                 }
@@ -529,6 +534,7 @@ impl Settings {
                 "serving_ml" => s.serving_ml = v.parse::<u32>().unwrap_or(250).clamp(50, 1000),
                 "water_start" => s.water_start = v.parse::<u32>().unwrap_or(9).min(23),
                 "water_end" => s.water_end = v.parse::<u32>().unwrap_or(22).min(24),
+                "smoke_limit" => s.smoke_limit = v.parse::<u32>().unwrap_or(0).min(100),
                 "mail_enabled" => s.mail_enabled = v != "0",
                 "mail_code" => s.mail_code = v != "0",
                 "mail_code_hide_seconds" => s.mail_code_hide_seconds=v.parse::<u32>().unwrap_or(60).clamp(15,300),
@@ -587,6 +593,7 @@ impl Settings {
                 ("serving_ml".into(), self.serving_ml.to_string()),
                 ("water_start".into(), self.water_start.to_string()),
                 ("water_end".into(), self.water_end.to_string()),
+                ("smoke_limit".into(), self.smoke_limit.to_string()),
                 ("mail_enabled".into(), (self.mail_enabled as u8).to_string()),
                 ("mail_code".into(), (self.mail_code as u8).to_string()),
                 ("mail_code_hide_seconds".into(), self.mail_code_hide_seconds.to_string()),

@@ -1,4 +1,4 @@
-//! 岛仔：Windows 顶部「灵动岛」。
+﻿//! 岛仔：Windows 顶部「灵动岛」。
 //!
 //! - `app` / `pages`：与平台无关的界面与动效（外壳与录制器共用）
 //! - `anim` / `paint` / `shape` / `theme`：弹簧、矢量绘制、面板轮廓、配色字体
@@ -28,6 +28,8 @@ pub mod side_dock;
 mod task_picker;
 pub mod model;
 pub mod timers;
+pub mod browser_login;
+pub mod smoke;
 pub mod otp;
 pub mod quota;
 mod quota_ui;

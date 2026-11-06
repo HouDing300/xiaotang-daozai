@@ -1,4 +1,4 @@
-# 参与开发
+﻿# 参与开发
 
 欢迎反馈兼容性问题、修复 bug 或完善使用说明。提交较大的功能前，先开 Issue 说明具体场景与预期行为。
 
@@ -29,7 +29,9 @@ cargo run --locked --bin daozai
 | `src/calendar.rs`、`src/calendar_ui.rs` | CalDAV、重复日程、月历与列表 |
 | `src/mail.rs`、`src/mail_reader.rs` | IMAP、MIME、验证码与邮件阅读 |
 | `src/quota*.rs` 及 provider 模块 | AI 额度与连接 |
-| `src/timers.rs` | 自定义定时提醒的数据、触发判定与单元测试 |
+| `src/timers.rs` | 定时提醒的数据、触发判定与单元测试（含站立、抽烟两个内置提醒） |
+| `src/smoke.rs` | 抽烟记录与每日/近 7 天统计 |
+| `src/browser_login.rs` | WorkBuddy 登录态自动抓取（独立 Edge 配置 + DPAPI/AES-GCM） |
 | `src/model.rs` | 配置读写与数据目录引导／迁移 |
 | `src/native.rs`、`src/system.rs` | 原生窗口、输入、拖放和系统事件 |
 | `src/ui_tests.rs` | 无窗口交互与布局回归测试 |

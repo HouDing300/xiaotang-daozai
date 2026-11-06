@@ -1,4 +1,4 @@
-//! 自定义定时提醒：间隔循环 / 每日固定时刻，可设标题、正文、生效时段与开关。
+﻿//! 自定义定时提醒：间隔循环 / 每日固定时刻，可设标题、正文、生效时段与开关。
 //!
 //! 提醒列表保存在 `config_dir()/timers.json`，与设置、待办等数据一起随数据目录迁移。
 //! 触发判定集中在 `TimerList::take_due`，不依赖界面，便于回归测试。
@@ -9,11 +9,13 @@ use serde_json::{json, Value};
 use std::{fs, path::PathBuf};
 
 const FILE: &str = "timers.json";
-/// 内置「站立提醒」的固定 id：设置里是独立开关，不算自定义提醒。
+/// 内置「站立提醒」「抽烟提醒」的固定 id：各自是独立功能，不算自定义提醒。
 pub const STAND_ID: &str = "stand-preset";
-/// 「专注与定时」分组下与专注(2)、饮水(3)并列的两个子页（0..11 是原有子页）。
+pub const SMOKE_ID: &str = "smoke-preset";
+/// 「专注与定时」分组下与专注(2)、饮水(3)并列的子页（0..11 是原有子页）。
 pub const STAND_TAB: usize = 12;
-pub const CUSTOM_TAB: usize = 13;
+pub const SMOKE_TAB: usize = 13;
+pub const CUSTOM_TAB: usize = 14;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TimerMode {
@@ -276,6 +278,32 @@ impl TimerList {
     /// 内置「站立提醒」，尚未开启时返回 None。
     pub fn stand(&self) -> Option<&TimerItem> {
         self.find(STAND_ID)
+    }
+
+    /// 内置「抽烟提醒」，尚未开启时返回 None。
+    pub fn smoke(&self) -> Option<&TimerItem> {
+        self.find(SMOKE_ID)
+    }
+
+    /// 创建或更新内置抽烟提醒。
+    pub fn set_smoke(&mut self, enabled: bool, minutes: u32, start_hour: u32, end_hour: u32, now: i64) {
+        self.replace(TimerItem {
+            id: SMOKE_ID.into(),
+            title: "抽烟提醒".into(),
+            body: "到间隔了，先缓一缓，或者只抽半根。".into(),
+            enabled,
+            mode: TimerMode::Interval { minutes: minutes.clamp(1, 720) },
+            start_hour: start_hour.min(24),
+            end_hour: end_hour.min(24),
+            last_fired: now,
+            fired_on: String::new(),
+            snooze_until: 0,
+        });
+    }
+
+    /// 自定义提醒（排除两个内置项），岛上与设置列表都用它。
+    pub fn custom(&self) -> impl Iterator<Item = &TimerItem> {
+        self.items.iter().filter(|i| i.id != STAND_ID && i.id != SMOKE_ID)
     }
 
     /// 创建或更新内置站立提醒。只在设置里真的改动时调用，避免每帧重置计时基准。

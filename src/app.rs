@@ -49,7 +49,10 @@ fn pill_shadow(painter:&egui::Painter,rect:Rect,radius:f32,strength:f32){
         painter.rect_filled(r,radius+grow*0.8,Color32::from_black_alpha((255.0*a*strength) as u8));
     }
 }
-pub(crate) const PAGE_NAMES: [&str; 9] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程", "定时"];
+pub(crate) const PAGE_NAMES: [&str; 11] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程", "自定义定时", "站立", "抽烟"];
+/// 岛上的内置提醒页：与专注、饮水同级，可在页面管理里单独开关。
+pub(crate) const STAND_PAGE: usize = 9;
+pub(crate) const SMOKE_PAGE: usize = 10;
 
 // ---------- 动效参数 ----------
 /// 悬停意图缓冲：光标停留这么久才真正展开（期间药丸轻微胀大作为反馈），防误触。
@@ -584,7 +587,7 @@ pub struct App {
     page_dir: f32,
     page_t0: f64,
     slide: Spring,
-    dots: [Spring; 9],
+    dots: [Spring; 11],
     wheel_delta: f32,
     wheel_at: f64,
     wheel_page_at: f64,
@@ -624,6 +627,7 @@ pub struct App {
 
     // 自定义定时提醒（设置分组「专注与定时」）
     pub(crate) timers: crate::timers::TimerList,
+    pub(crate) smoke: crate::smoke::SmokeLog,
     pub(crate) timer_form: crate::timers::TimerForm,
     // 设置 → 关于：数据目录表单
     pub(crate) data_dir_input: String,
@@ -773,6 +777,7 @@ impl App {
             remind_t: Spring::new(1.0, 400.0, 0.8),
             last_reminder: 0.0,
             timers: crate::timers::TimerList::load(),
+            smoke: crate::smoke::SmokeLog::load(),
             timer_form: Default::default(),
             data_dir_input: String::new(),
             data_dir_status: String::new(),
@@ -1237,7 +1242,7 @@ impl App {
 
     pub fn show_page(&mut self,page:usize) {
         if !self.settings.visible_pages[page] {
-            self.settings_tab=[1,2,3,5,4,7,11,8,crate::timers::CUSTOM_TAB][page];
+            self.settings_tab=[1,2,3,5,4,7,11,8,crate::timers::CUSTOM_TAB,crate::timers::STAND_TAB,crate::timers::SMOKE_TAB][page];
             self.open_settings();
             return;
         }
@@ -2325,7 +2330,7 @@ impl App {
         let (hover,press)=c.hover_t(&settings);
         c.circle(394.0,18.0,13.0,Color32::from_white_alpha((hover*24.0) as u8));
         paint::gear(&c.scaled(394.0,18.0,0.8*(1.0-press*0.08)),394.0,18.0,paint::mix(theme::GRAY,theme::WHITE,hover));
-        if settings.clicked(){self.settings_tab=[1,2,3,5,4,7,11,8,crate::timers::CUSTOM_TAB][self.page];self.open_settings();}
+        if settings.clicked(){self.settings_tab=[1,2,3,5,4,7,11,8,crate::timers::CUSTOM_TAB,crate::timers::STAND_TAB,crate::timers::SMOKE_TAB][self.page];self.open_settings();}
         if self.subpage==Some(self.page) {
             c.text(15.0,25.0,"‹",19.0,W::Bold,theme::WHITE,H::Left);
             c.text(37.0,25.0,if self.page==2{"饮水设置"}else{"专注设置"},size::TITLE,W::Bold,theme::WHITE,H::Left);
@@ -2367,7 +2372,9 @@ impl App {
             4 => ("待办", "清单", theme::GREEN),
             5 => ("邮箱", "", theme::CYAN),
             6 => ("AI", "额度", theme::SOFT_GREEN),
-            8 => ("定时", "提醒", theme::YELLOW),
+            8 => ("定时", "列表", theme::YELLOW),
+            9 => ("站立", "提醒", theme::SOFT_GREEN),
+            10 => ("抽烟", "记录", theme::YELLOW),
             _ => ("岛仔", "设置", theme::WHITE),
         };
         let wa = c.text(15.0, base, a, size::TITLE, W::Bold, theme::WHITE, H::Left);
@@ -2425,6 +2432,8 @@ impl App {
             5 => self.page_mail(c, env, cmds),
             6 => self.page_quota(c),
             8 => self.page_timers(c,env),
+            9 => self.page_stand(c,env),
+            10 => self.page_smoke(c,env),
             CALENDAR_PAGE => self.page_calendar(c,env),
             _ => self.page_settings(c),
         }
