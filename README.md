@@ -12,7 +12,7 @@ Windows 桌面伙伴 · 音乐与歌词 · 邮件验证码 · 日程提醒 · AI
 [![License](https://img.shields.io/badge/License-MIT-3cbf91)](LICENSE)
 [![CI](https://github.com/Renly1994/xiaotang-daozai/actions/workflows/ci.yml/badge.svg)](https://github.com/Renly1994/xiaotang-daozai/actions/workflows/ci.yml)
 
-[下载 Windows 版](https://github.com/Renly1994/xiaotang-daozai/releases/latest) · [使用指南](docs/USAGE.md) · [更新记录](CHANGELOG.md) · [反馈问题](https://github.com/Renly1994/xiaotang-daozai/issues)
+[下载 Windows 版](https://github.com/Renly1994/xiaotang-daozai/releases/latest) · [使用指南](docs/USAGE.md) · [移植手册](docs/FORK-GUIDE.md) · [更新记录](CHANGELOG.md) · [反馈问题](https://github.com/Renly1994/xiaotang-daozai/issues)
 
 </div>
 
