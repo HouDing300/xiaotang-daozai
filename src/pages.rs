@@ -27,7 +27,7 @@ fn big_switch(c: &Card, x: f32, y: f32, on: bool, id: impl std::hash::Hash) -> b
     let track = if on { theme::GREEN } else { mix(Color32::from_rgb(58, 58, 62), theme::WHITE, hover * 0.12) };
     c.fill(x, y - 7.0, 34.0, 14.0, 7.0, track);
     c.circle(if on { x + 25.0 } else { x + 9.0 }, y, 5.4, theme::WHITE);
-    c.text(x + 42.0, y + 4.0, if on { "已开" } else { "关闭" }, 9.5, W::Semibold, if on { theme::GREEN } else { theme::DIM }, H::Left);
+    c.text(x + 40.0, y + 4.0, if on { "已开" } else { "关闭" }, 9.5, W::Semibold, if on { theme::GREEN } else { theme::DIM }, H::Left);
     hit.clicked()
 }
 
@@ -556,7 +556,7 @@ impl App {
         // 右侧：大开关 + 当前状态
         c.fill(196.0, 31.0, 181.0, 93.0, 12.0, theme::CARD);
         c.text(214.0, 50.0, "久坐提醒", 12.0, W::Semibold, theme::WHITE, H::Left);
-        if big_switch(c, 348.0, 45.0, enabled, "stand-toggle") {
+        if big_switch(c, 300.0, 45.0, enabled, "stand-toggle") {
             let new_value = !enabled;
             self.timers.set_stand(new_value, minutes, item.as_ref().map(|i| i.start_hour).unwrap_or(9), item.as_ref().map(|i| i.end_hour).unwrap_or(22), now);
             self.timers.save();
@@ -1167,6 +1167,7 @@ impl App {
     pub(crate) fn mail_detail(&mut self, c: &Card, raw: &mail::Item, cmds: &mut Vec<Cmd>) {
         let hidden=self.mail_code_hidden(raw);
         let display=self.display_mail(raw);let item=&display;
+        let body=self.mail_body_lines(item);
         c.fill(36.0, 36.0, 347.0, 188.0, 11.0, theme::CARD);
         let back = c.hit(330.0, 42.0, 44.0, 14.0, ("mail-back", item.uid));
         let bh = c.hover_t(&back).0;
@@ -1198,9 +1199,8 @@ impl App {
         content.style_mut().spacing.scroll.floating=false;
         content.spacing_mut().scroll.bar_width=4.0*c.s;
         egui::ScrollArea::vertical().id_salt(("mail-body",&item.account,item.uid)).max_height(90.0*c.s).auto_shrink([false,false]).show(&mut content,|ui|{
-            let body=crate::mail_format::item_lines(item);
             if !body.is_empty() {
-                crate::mail_reader::body_ui(ui,&body,11.5);
+                crate::mail_reader::body_ui(ui,body.as_ref(),11.5);
             }else if item.links.is_empty(){
                 ui.label(egui::RichText::new("（这封邮件没有正文）").font(c.font(12.0,W::Regular)).color(theme::DIM));
             }

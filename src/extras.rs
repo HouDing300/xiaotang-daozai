@@ -97,11 +97,9 @@ fn notice_icon(c:&Card,x:f32,y:f32,a:&Alert) {
         let elapsed=((now-a.at).max(0.0)) as f32;
         match id {
             crate::timers::STAND_ID=>{
-                c.ui.ctx().request_repaint_after(std::time::Duration::from_millis(80));
                 crate::paint::stand_person(c,x,y,22.0,elapsed,theme::SOFT_GREEN);
             },
             crate::timers::SMOKE_ID=>{
-                c.ui.ctx().request_repaint_after(std::time::Duration::from_millis(80));
                 crate::paint::cigarette(c,x,y,25.0,elapsed,true);
             },
             _=>crate::paint::stopwatch(&c.scaled(x,y,0.65),x,y,8.0,0.0,theme::BLUE),
@@ -242,6 +240,28 @@ impl App {
             bluetooth: None, meeting: None, timer_id: Some(id),
         }, true);
     }
+    /// 通知卡片上的「抽一支」：记一根、重新计时、关掉这次提醒。
+    pub(crate) fn smoke_from_alert(&mut self) {
+        let now = chrono::Local::now().timestamp();
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        self.smoke.add(now);
+        self.smoke.save();
+        self.ack_timer(crate::timers::SMOKE_ID);
+        self.say(format!("已记录，今天第 {} 根", self.smoke.today(&today)));
+    }
+
+    /// 按提醒来源跳到对应的定时子页：站立/抽烟各有自己的一页。
+    pub(crate) fn open_timer_settings_for(&mut self, id: &str) {
+        self.settings_tab = if id == crate::timers::STAND_ID {
+            crate::timers::STAND_TAB
+        } else if id == crate::timers::SMOKE_ID {
+            crate::timers::SMOKE_TAB
+        } else {
+            crate::timers::CUSTOM_TAB
+        };
+        self.open_settings();
+    }
+
     /// 跳到「专注与定时 → 自定义定时」子页。
     pub(crate) fn open_timers_settings(&mut self) {
         self.settings_tab = crate::timers::CUSTOM_TAB;
@@ -475,12 +495,19 @@ impl App {
             let is_water=a.page==2;let is_focus=a.page==1;let is_power=a.title=="电量偏低";
             let timer_id=a.timer_id.clone();
             notice_icon(&nc,22.0,22.0,a);
-            let max=if is_water || timer_id.is_some(){125.0}else{195.0};
+            // 定时提醒有三个按钮，文本区让出一点宽度，避免挤到图标上。
+            let max=if timer_id.is_some(){105.0}else if is_water{125.0}else{195.0};
             nc.centered_text(43.0,14.0,&nc.fit(&a.title,11.0,W::Semibold,max),11.0,W::Semibold,theme::WHITE,H::Left);
             nc.centered_text(43.0,30.0,&nc.fit(&a.body,10.5,W::Regular,max),10.5,W::Regular,theme::GRAY,H::Left);
             if let Some(id)=timer_id {
-                if notice_button(&nc,181.0,12.0,62.0,"稍后","timer-snooze"){self.notice=None;self.snooze_timer(&id);}
-                if notice_button(&nc,250.0,12.0,68.0,"定时设置","timer-settings"){self.notice=None;self.open_timers_settings();}
+                let is_smoke=id==crate::timers::SMOKE_ID;
+                let primary=if is_smoke{"抽一支"}else{"知道了"};
+                if notice_button(&nc,156.0,12.0,54.0,primary,"timer-primary"){
+                    self.notice=None;
+                    if is_smoke{self.smoke_from_alert();}else{self.ack_timer(&id);}
+                }
+                if notice_button(&nc,214.0,12.0,44.0,"稍后","timer-snooze"){self.notice=None;self.snooze_timer(&id);}
+                if notice_button(&nc,262.0,12.0,68.0,"定时设置","timer-settings"){self.notice=None;self.open_timer_settings_for(&id);}
             }else if is_water {
                 if notice_button(&nc,181.0,12.0,62.0,"稍后","water-snooze"){self.last_reminder=self.t-self.settings.water_minutes as f64*60.0+600.0;self.notice=None;}
                 if notice_button(&nc,250.0,12.0,68.0,"喝一口","water-confirm"){self.notice=None;self.drink_water();}

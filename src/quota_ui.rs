@@ -173,6 +173,18 @@ fn reset_text(at:Option<i64>,now:&chrono::DateTime<chrono::Local>)->String {
     let format=if at.date_naive()==now.date_naive(){"今天 %H:%M 重置"}else if at.year()==now.year(){"%-m月%-d日 %H:%M 重置"}else{"%Y/%-m/%-d %H:%M 重置"};
     at.format(format).to_string()
 }
+/// 桥接服务的在线状态每 3 秒探一次即可，别让设置窗口每帧去连 10086。
+fn bridge_online(ctx:&egui::Context)->bool{
+    let id=egui::Id::new("workbuddy-bridge-probe");
+    let now=ctx.input(|input|input.time);
+    let (at,online):(f64,bool)=ctx.data(|data|data.get_temp(id).unwrap_or((-10.0,false)));
+    if now-at>3.0{
+        let online=quota::workbuddy::bridge_available();
+        ctx.data_mut(|data|data.insert_temp(id,(now,online)));
+        online
+    }else{online}
+}
+
 impl App {
     pub(crate) fn quota_tick(&mut self){
         if let Some(result)=self.quota.workbuddy_login.as_mut().and_then(|login|login.poll(chrono::Local::now().timestamp())){
@@ -430,6 +442,7 @@ impl App {
             settings_control_row(ui,"备注",56.0,|ui|{ui.add_sized([ui.available_width(),27.0],egui::TextEdit::singleline(&mut self.quota.alias).vertical_align(egui::Align::Center).hint_text("例如：个人、工作、备用"))});
             if self.quota.provider==Provider::WorkBuddy{
                 ui.label("连接官网个人账号，查看剩余积分。");
+                ui.add(egui::Label::new(egui::RichText::new("下面三种方式任选其一，互不冲突；已连接的账号随时可以重新连接换一种。").size(11.0).color(ui.visuals().weak_text_color())).wrap());
                 ui.horizontal(|ui|{
                     if ui.add_enabled(self.quota.workbuddy_login.is_none()&&self.quota.workbuddy_connecting.is_none(),egui::Button::new("自动获取登录态")).clicked(){
                         match crate::browser_login::BrowserLogin::start(){
@@ -465,9 +478,24 @@ impl App {
                     });
                     ui.add(egui::Label::new(egui::RichText::new("只保留 session 等 4 个登录 Cookie，其余站点凭据会被丢弃；会话用 Windows DPAPI 加密后存在本机，只会发回 WorkBuddy 官网，不会上传到别处。登录态通常 30 天有效，过期后这里会提示重新获取。").size(11.0).color(ui.visuals().weak_text_color())).wrap());
                 });
-                egui::CollapsingHeader::new("用浏览器扩展连接（需已安装桥接）").default_open(false).show(ui,|ui|{
-                    ui.add(egui::Label::new(egui::RichText::new("依赖本机 127.0.0.1:10086 的浏览器连接服务，多数机器没有装，装了才用得上。").size(11.0)).wrap());
-                    if ui.add_enabled(self.quota.workbuddy_connecting.is_none(),egui::Button::new("连接当前浏览器")).clicked(){
+                let online=bridge_online(ui.ctx());
+                let bridge_title=if online{"用浏览器扩展连接（原作者方案） · 已检测到桥接服务"}else{"用浏览器扩展连接（原作者方案，需装 Kimi WebBridge）"};
+                egui::CollapsingHeader::new(bridge_title).default_open(online).show(ui,|ui|{
+                    if online{
+                        ui.add(egui::Label::new(egui::RichText::new("已检测到本机 127.0.0.1:10086 的浏览器连接服务，可用日常浏览器里已登录的官网标签页完成连接；若仍提示失败，请检查浏览器扩展是否已连上服务。").size(11.0).color(Color32::from_rgb(118,196,151))).wrap());
+                    }else{
+                        ui.add(egui::Label::new(egui::RichText::new("这条通道是原仓库用的桥：岛仔只是客户端，需要本机先装 Kimi WebBridge（浏览器扩展 + 本地服务，监听 127.0.0.1:10086）。没装就用上面的自动获取或手动 Cookie，功能是等价的。").size(11.0).color(ui.visuals().weak_text_color())).wrap());
+                        ui.horizontal_wrapped(|ui|{
+                            if ui.button("复制 Windows 安装命令").clicked(){
+                                let command="irm https://cdn.kimi.com/webbridge/install.ps1 | iex";
+                                ui.output_mut(|out|out.copied_text=command.into());
+                                self.quota.note="已复制安装命令：在 PowerShell 里执行后，再装 Chrome/Edge 的 Kimi WebBridge 扩展".into();
+                            }
+                            if ui.link("打开官方安装说明").clicked(){self.pending.push(Cmd::OpenUrl("https://www.kimi.com/zh-cn/features/webbridge".into()));}
+                        });
+                        ui.add(egui::Label::new(egui::RichText::new("安装命令不会由岛仔自动执行；请以官方页面的最新说明为准。").size(10.5).color(ui.visuals().weak_text_color())).wrap());
+                    }
+                    if ui.add_enabled(self.quota.workbuddy_connecting.is_none()&&online,egui::Button::new("连接当前浏览器")).on_hover_text(if online{"用已登录的官网标签页连接"}else{"需要先安装并启动浏览器桥接服务"}).clicked(){
                         let expected=self.quota.connect_target.as_ref().and_then(|id|self.quota.config.accounts.iter().find(|a|&a.id==id)).and_then(|a|a.slot.clone());
                         self.quota.note.clear();
                         self.quota.workbuddy_connecting=Some(quota::workbuddy::Connect::start(self.quota.alias.clone(),expected));

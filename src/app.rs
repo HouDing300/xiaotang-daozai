@@ -709,6 +709,8 @@ pub struct App {
     bt_initialized: bool,
     /// v0.5.5：邮件账号、最近邮件与设置表单。
     pub(crate) mail: MailState,
+    /// 邮件正文排版缓存：长邮件几百段，不能每帧重新解析一次。
+    mail_lines_cache: Option<(std::sync::Arc<str>, u32, std::sync::Arc<Vec<crate::mail_format::Line>>)>,
     /// v0.5.6：日历（CalDAV）配置、未来 24 小时事件与设置表单。
     pub(crate) calendar: CalendarState,
     pub(crate) quota: crate::quota_ui::State,
@@ -816,6 +818,7 @@ impl App {
             bt_shown: Vec::new(),
             bt_initialized: false,
             mail: MailState { accounts: mail::load_accounts(), ..Default::default() },
+            mail_lines_cache: None,
             calendar: CalendarState::load(),
             quota: crate::quota_ui::State::load(),
             updates: Default::default(),
@@ -837,6 +840,16 @@ impl App {
         self.mail.privacy.hidden(item,self.t,self.settings.mail_code_hide_seconds)
     }
     pub(crate) fn reveal_mail_code(&mut self,item:&mail::Item){self.mail.privacy.reveal(item,self.t);}
+    /// 同一封邮件、同一段正文只解析一次排版，避免每帧重复切分几百个段落。
+    pub(crate) fn mail_body_lines(&mut self, item: &mail::Item) -> std::sync::Arc<Vec<crate::mail_format::Line>> {
+        // display_mail 每帧只 clone Arc，指针相同就说明是同一段正文，连哈希都不用算。
+        let hit = self.mail_lines_cache.as_ref().is_some_and(|(text, uid, _)| *uid == item.uid && std::sync::Arc::ptr_eq(text, &item.summary));
+        if !hit {
+            self.mail_lines_cache = Some((item.summary.clone(), item.uid, std::sync::Arc::new(crate::mail_format::item_lines(item))));
+        }
+        self.mail_lines_cache.as_ref().unwrap().2.clone()
+    }
+
     pub(crate) fn display_mail(&self,item:&mail::Item)->mail::Item {
         let mut safe=item.clone();
         if self.mail_code_hidden(item) {
@@ -1833,9 +1846,15 @@ impl App {
         let ambient=self.settings.skin==model::Skin::Fluid && self.fluid.animating() || self.pomo.running && (self.open && self.page==1 || !self.open && !minimal_pill && self.notice.is_none() && bar::animations_enabled())
             || self.media.playing && (self.open && self.page==0 || !self.open && !minimal_pill && self.notice.is_none() && self.media.is_music())
             || self.notice.as_ref().is_some_and(|notice|notice.meeting.is_some());
-        let animating=transitioning || ambient || pet_visible && self.pet.state!=PetState::Sleeping;
-        // 交互形变保持 60 帧，媒体 30 帧；小表情 20 帧，睡眠 10 帧，静态界面每秒核对提醒。
-        let repaint_after=std::time::Duration::from_secs_f64(if transitioning{1.0/60.0}else if ambient{1.0/30.0}else if pet_visible{if self.pet.state==PetState::Sleeping{0.1}else{0.05}}else{1.0});
+        // 站立/抽烟页的小人与烟雾、以及定时提醒卡片里的图标都是逐帧动画，
+        // 原来落进「静态界面 1 秒一帧」，看起来就像卡住了；这里单独提到 60 帧。
+        let icon_anim=bar::animations_enabled() && (
+            self.open && matches!(self.page,STAND_PAGE|SMOKE_PAGE)
+            || self.notice.as_ref().is_some_and(|notice|notice.timer_id.is_some())
+        );
+        let animating=transitioning || ambient || icon_anim || pet_visible && self.pet.state!=PetState::Sleeping;
+        // 交互形变与图标动画保持 60 帧，媒体 30 帧；小表情 20 帧，睡眠 10 帧，静态界面每秒核对提醒。
+        let repaint_after=std::time::Duration::from_secs_f64(if transitioning||icon_anim{1.0/60.0}else if ambient{1.0/30.0}else if pet_visible{if self.pet.state==PetState::Sleeping{0.1}else{0.05}}else{1.0});
         cmds.append(&mut self.pending);
         FrameOut {
             region: rel(floating_toast.into_iter().chain(self.shelf_menu_rect.map(|r|r.union(r + ctx.style().visuals.popup_shadow.margin()).expand(1.0 / ctx.pixels_per_point()))).fold(region,Rect::union).intersect(ui.max_rect())),

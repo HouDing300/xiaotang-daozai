@@ -483,17 +483,12 @@ pub fn stopwatch(c: &Card, cx: f32, cy: f32, r: f32, hand: f32, color: Color32) 
 pub fn stand_person(c: &Card, cx: f32, cy: f32, size: f32, t: f32, color: Color32) {
     let u = size / 30.0;
     let cycle = 4.4;
-    let p = if t.is_finite() { (t % cycle) / cycle } else { 0.0 };
-    let stand = if p < 0.32 {
-        0.0
-    } else if p < 0.50 {
-        crate::anim::smoothstep(0.0, 1.0, (p - 0.32) / 0.18)
-    } else if p < 0.86 {
-        1.0
-    } else {
-        1.0 - crate::anim::smoothstep(0.0, 1.0, (p - 0.86) / 0.14)
-    };
-    let bob = (t * 2.0).sin() * 0.4 * u * stand;
+    // 一条连续的余弦曲线完成「坐下 → 起身 → 坐下」：一阶导处处连续，
+    // 分段缓动在相位交界处会突然变速，看起来就是一顿一顿的。
+    let p = if t.is_finite() { (t / cycle).rem_euclid(1.0) } else { 0.0 };
+    let wave = 0.5 - 0.5 * (p * TAU).cos();
+    let stand = crate::anim::smoothstep(0.0, 1.0, wave);
+    let bob = (t * 2.0).sin() * 0.35 * u * stand;
     let at = |a: (f32, f32), b: (f32, f32)| (crate::anim::lerp(a.0, b.0, stand), crate::anim::lerp(a.1, b.1, stand) + bob);
 
     let hip = at((cx, cy + 3.6 * u), (cx, cy + 2.0 * u));
@@ -529,11 +524,15 @@ pub fn stand_person(c: &Card, cx: f32, cy: f32, size: f32, t: f32, color: Color3
 pub fn cigarette(c: &Card, cx: f32, cy: f32, size: f32, t: f32, lit: bool) {
     let u = size / 28.0;
     let ink = if lit { theme::YELLOW } else { Color32::from_gray(124) };
-    let base = (cx - 9.0 * u, cy - 0.2 * u);
+    // 烟身斜着放（左下燃烧、右上滤嘴），烟缕从燃烧端斜上方升起：
+    // 水平烟身 + 竖直烟会拼成一个直角 L，小尺寸下尤其不像烟。
+    let burn = (cx - 9.0 * u, cy + 2.0 * u);
+    let tip = (cx + 9.0 * u, cy - 2.0 * u);
+    let base = (burn.0, burn.1 - 1.4 * u);
     if lit {
         // 三缕烟：起点错开，边升边淡，横向轻轻摆。
         // 小尺寸（提醒卡片）只留两缕，否则挤成一根竖线。
-        let wisps: &[(f32, f32, f32)] = if size < 26.0 { &[(-0.6, 2.2, 11.0), (2.2, 2.8, 14.0)] } else { &[(-0.4, 2.6, 16.0), (1.8, 3.4, 21.0), (3.8, 1.9, 12.5)] };
+        let wisps: &[(f32, f32, f32)] = if size < 26.0 { &[(-0.8, 3.1, 11.0), (2.4, 3.8, 14.0)] } else { &[(-0.6, 3.2, 16.0), (1.8, 4.0, 21.0), (3.8, 2.4, 12.5)] };
         for (i, (dx, amp, height)) in wisps.iter().enumerate() {
             let k = i as f32;
             let speed = 1.7 + k * 0.45;
@@ -541,23 +540,29 @@ pub fn cigarette(c: &Card, cx: f32, cy: f32, size: f32, t: f32, lit: bool) {
             for step in 1..=7 {
                 let v = step as f32 / 7.0;
                 let wobble = ((v * 3.4 - t * speed + k * 1.9).sin()) * amp * v * u;
-                let point = (base.0 + dx * u + wobble, base.1 - height * u * v);
+                let drift = v * 3.6 * u;
+                let point = (base.0 + dx * u + wobble + drift, base.1 - height * u * v);
                 c.seg(prev, point, (1.5 * u).max(1.25), alpha(ink, 0.72 * (1.0 - v * 0.78)));
                 prev = point;
             }
         }
     }
-    // 细长烟身 + 浅色滤嘴，比例接近真烟；小尺寸下也不低于 3pt，免得细成一条线。
-    let h = (3.4 * u).max(3.0);
-    c.fill(cx - 9.6 * u, cy - h / 2.0, 15.2 * u, h, h * 0.45, ink);
-    c.fill(cx + 5.2 * u, cy - h / 2.0, 4.4 * u, h, h * 0.45, mix(ink, theme::WHITE, 0.42));
+    let width = (3.4 * u).max(3.0);
+    let filter = mix(ink, theme::WHITE, 0.42);
+    let filter_from = (cx + 4.8 * u, cy - 1.1 * u);
+    c.seg(burn, tip, width, ink);
+    c.circle(burn.0, burn.1, width / 2.0, ink);
+    c.circle(tip.0, tip.1, width / 2.0, ink);
+    c.seg(filter_from, tip, width, filter);
+    c.circle(filter_from.0, filter_from.1, width / 2.0, filter);
+    c.circle(tip.0, tip.1, width / 2.0, filter);
     if lit {
         // 燃着的烟头：一点跳动的火光。
-        let pulse = 0.5 + 0.5 * ((t * 6.0).sin() as f32);
-        c.circle(cx - 9.2 * u, cy + 0.1 * u, 1.6 * u, mix(theme::RED_TOP, theme::YELLOW, pulse));
-        c.circle(cx - 9.2 * u, cy + 0.1 * u, 3.6 * u, alpha(theme::YELLOW, 0.16));
+        let pulse = 0.5 + 0.5 * (t * 6.0).sin();
+        c.circle(burn.0, burn.1, 1.6 * u, mix(theme::RED_TOP, theme::YELLOW, pulse));
+        c.circle(burn.0, burn.1, 3.4 * u, alpha(theme::YELLOW, 0.16));
     } else {
-        c.circle(cx - 9.4 * u, cy + 0.1 * u, 1.3 * u, Color32::from_gray(88));
+        c.circle(burn.0, burn.1, 1.3 * u, Color32::from_gray(88));
     }
 }
 

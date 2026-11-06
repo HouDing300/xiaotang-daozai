@@ -110,14 +110,26 @@ impl SmokeLog {
     }
 
     /// 最近 `days` 天（含今天）的每日根数，从早到晚。
+    /// 岛面每帧都会画这张图，所以只扫一遍记录，不按天重复遍历整个日志。
     pub fn recent_days(&self, today: &str, days: usize) -> Vec<(String, usize)> {
         let Ok(end) = NaiveDate::parse_from_str(today, "%Y-%m-%d") else {
             return Vec::new();
         };
-        (0..days)
+        let list: Vec<NaiveDate> = (0..days)
             .rev()
             .filter_map(|back| end.checked_sub_signed(chrono::Duration::days(back as i64)))
-            .map(|day| (day.format("%m-%d").to_string(), self.count_on(day)))
+            .collect();
+        let mut counts = vec![0usize; list.len()];
+        for ts in &self.events {
+            if let Some(day) = day_of(*ts) {
+                if let Ok(index) = list.binary_search(&day) {
+                    counts[index] += 1;
+                }
+            }
+        }
+        list.into_iter()
+            .zip(counts)
+            .map(|(day, count)| (day.format("%m-%d").to_string(), count))
             .collect()
     }
 

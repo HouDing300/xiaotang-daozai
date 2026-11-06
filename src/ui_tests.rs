@@ -5445,3 +5445,67 @@ fn timers_layout_gallery(){
         shoot(&mut h,name);
     }
 }
+
+#[test]
+fn timer_notice_ack_closes_and_restarts_the_interval(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.frame(vec![]);
+    let now=chrono::Local::now().timestamp();
+    h.app.timers.set_stand(true,45,0,0,now-3600);
+    h.app.timer_alert(crate::timers::STAND_ID.into(),"站立提醒".into(),"起来走动一下".into());
+    for _ in 0..60{h.frame(vec![]);}
+    assert!(h.app.notice.is_some(),"站立提醒应弹出通知");
+    h.click_text("知道了");
+    assert!(h.app.notice.is_none(),"「知道了」应直接关掉通知");
+    let item=h.app.timers.stand().unwrap();
+    assert_eq!(item.snooze_until,0,"「知道了」不是稍后，不该设 snooze");
+    assert!(item.last_fired>=now,"应从现在重新计时");
+}
+
+#[test]
+fn smoke_notice_adds_one_cigarette_from_the_notice(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.frame(vec![]);
+    let now=chrono::Local::now().timestamp();
+    h.app.timers.set_smoke(true,90,0,0,now-3600);
+    h.app.timer_alert(crate::timers::SMOKE_ID.into(),"抽烟提醒".into(),"到间隔了，先缓一缓".into());
+    for _ in 0..60{h.frame(vec![]);}
+    h.click_text("抽一支");
+    let today=chrono::Local::now().format("%Y-%m-%d").to_string();
+    assert_eq!(h.app.smoke.today(&today),1,"通知里的「抽一支」应直接记一根");
+    assert!(h.app.notice.is_none());
+}
+
+#[test]
+fn timer_notice_settings_opens_matching_subpage(){
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();h.frame(vec![]);
+    h.app.timer_alert(crate::timers::STAND_ID.into(),"站立提醒".into(),"起来走动一下".into());
+    for _ in 0..60{h.frame(vec![]);}
+    h.click_text("定时设置");
+    assert_eq!(h.app.settings_tab,crate::timers::STAND_TAB,"站立提醒应设置跳到站立子页");
+    assert!(h.app.settings_open);
+}
+
+#[test]
+fn animated_timer_pages_and_notices_keep_a_smooth_frame_budget(){
+    if !crate::bar_layout::animations_enabled(){return;}
+    let _g=ENV_LOCK.lock().unwrap_or_else(|e|e.into_inner());let mut h=H::new();
+    h.app.settings.visible_pages[crate::app::STAND_PAGE]=true;
+    h.app.show_page(crate::app::STAND_PAGE);
+    for _ in 0..60{h.frame(vec![]);}
+    let check=|h:&mut H|{
+        let ctx=h.ctx.clone();
+        let t=h.t;
+        let mut delay=std::time::Duration::from_secs(1);
+        let _=ctx.run(egui::RawInput{screen_rect:Some(Rect::from_min_size(Pos2::ZERO,Vec2::new(WIN_W,WIN_H))),time:Some(t),..Default::default()},|ctx|{
+            egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx,|ui|{
+                let win=Rect::from_min_size(ui.max_rect().min,Vec2::new(WIN_W,WIN_H));
+                let env=Env{t,clock:"09:41:00".into(),today:"2026-10-28".into(),date:"10月28日 周三".into(),..Default::default()};
+                delay=h.app.frame(ui,win,&env).repaint_after;
+            });
+        });
+        delay
+    };
+    assert!(check(&mut h)<=std::time::Duration::from_millis(20),"站立页的动画应按 60 帧刷新");
+    h.app.timer_alert(crate::timers::STAND_ID.into(),"站立提醒".into(),"起来走动一下".into());
+    for _ in 0..6{h.frame(vec![]);}
+    assert!(check(&mut h)<=std::time::Duration::from_millis(20),"定时通知里的图标也应按 60 帧刷新");
+}

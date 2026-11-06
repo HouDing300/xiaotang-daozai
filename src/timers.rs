@@ -516,6 +516,18 @@ impl App {
         }
         self.timers.save();
     }
+
+    /// 通知卡片上的「知道了」：从现在重新计时，到下一个完整间隔再提醒。
+    pub(crate) fn ack_timer(&mut self, id: &str) {
+        let now = chrono::Local::now().timestamp();
+        let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+        if let Some(item) = self.timers.items.iter_mut().find(|i| i.id == id) {
+            item.snooze_until = 0;
+            item.last_fired = now;
+            item.fired_on = today;
+        }
+        self.timers.save();
+    }
 }
 
 #[cfg(test)]

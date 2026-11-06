@@ -116,9 +116,9 @@ const COOKIE_NAMES:[&str;4]=["session","session_2","cb_login_mode","cb_login_rea
 const DEFAULT_UA:&str="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0";
 /// 本机没装桥接服务时给出可操作的提示，而不是笼统的「扩展未响应」。
 const BRIDGE_MISSING:&str="未检测到浏览器连接服务（127.0.0.1:10086）。请安装或启用对应的浏览器扩展桥接，或改用下方「使用 Cookie 连接」（无需扩展）。";
-fn bridge_available()->bool{
+pub(crate) fn bridge_available()->bool{
     let Ok(addr)=BRIDGE_ADDR.parse::<std::net::SocketAddr>()else{return false};
-    std::net::TcpStream::connect_timeout(&addr,Duration::from_millis(400)).is_ok()
+    std::net::TcpStream::connect_timeout(&addr,Duration::from_millis(150)).is_ok()
 }
 fn bridge(agent:&ureq::Agent,action:&str,args:Value)->Result<Value,String>{
     // 没有桥接服务时立刻返回，避免每次点击都干等 25 秒超时。

@@ -46,7 +46,7 @@ impl App {
         let Some(raw)=self.mail.reading.clone() else{return};
         let hidden=self.mail_code_hidden(&raw);
         let item=self.display_mail(&raw);
-        let body=mail_format::item_lines(&item);
+        let body=self.mail_body_lines(&item);
         let mut reveal=false;
         let focus=std::mem::take(&mut self.mail.reader_focus);
         let (mut close,mut link)=(false,None);
@@ -82,7 +82,7 @@ impl App {
                     if body.is_empty(){
                         ui.label(egui::RichText::new("（这封邮件没有正文）").size(14.0).color(Color32::from_gray(200)));
                     }else{
-                        body_ui(ui,&body,14.0);
+                        body_ui(ui,body.as_ref(),14.0);
                     }
                     if !item.links.is_empty(){
                         ui.add_space(12.0);ui.separator();ui.label(egui::RichText::new("邮件中的链接").strong());
