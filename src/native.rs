@@ -330,9 +330,11 @@ impl Window {
                 WINEVENT_OUTOFCONTEXT,
             )
         };
+        // 区域用哨兵值：首帧（包括启动即隐藏的空区域）也必须真正调用 SetWindowRgn，
+        // 否则整块透明画布会挡住下层程序的点击。
         let opaque_surface=cc.wgpu_render_state.as_ref().is_some_and(|state|state.adapter.get_info().backend==eframe::wgpu::Backend::Dx12);
         watch_drag(hwnd,cc.egui_ctx.clone());
-        Some(Self { hwnd, region: (0, 0, 0, 0), expanded: false, hook, browser_state:(None,PollClock::default()), drag_capture:DragCapture::default(), glass:None, backdrop:None, blur:false, blur_unavailable:false, opaque_surface })
+        Some(Self { hwnd, region: (i32::MIN, 0, 0, 0), expanded: false, hook, browser_state:(None,PollClock::default()), drag_capture:DragCapture::default(), glass:None, backdrop:None, blur:false, blur_unavailable:false, opaque_surface })
     }
 
     /// 使用目标屏幕的物理坐标定位，并在缩放、岛体大小、水平位置或屏幕连接变化后重新校正。

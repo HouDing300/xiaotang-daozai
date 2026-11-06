@@ -1,6 +1,6 @@
-﻿//! WorkBuddy 官方客户端积分汇总，浏览器授权连接。
+//! WorkBuddy 官方客户端积分汇总，浏览器授权连接。
 use super::{Account,Snapshot};
-use serde_json::{json,Value};
+use serde_json::Value;
 use std::{io::Read,sync::mpsc,time::Duration};
 #[derive(Clone,Debug)]
 #[derive(serde::Serialize,serde::Deserialize)]
@@ -29,7 +29,15 @@ pub fn parse(value:&Value)->Result<Snapshot,String>{
 fn valid_origin(origin:&str)->bool{matches!(origin,"https://www.codebuddy.cn"|"https://www.workbuddy.cn")}
 fn slot(uid:&str)->String{ring::digest::digest(&ring::digest::SHA256,uid.as_bytes()).as_ref().iter().map(|b|format!("{b:02x}")).collect()}
 #[derive(serde::Serialize,serde::Deserialize)]
-struct Session { origin:String, ua:String, cookie:String }
+struct Session { origin:String, ua:String, cookie:String, #[serde(default)] auth:Option<Auth> }
+#[derive(serde::Serialize,serde::Deserialize)]
+#[serde(rename_all="camelCase")]
+struct Auth{
+    access_token:String,
+    #[serde(default)] refresh_token:String,
+    #[serde(default)] domain:String,
+    #[serde(default)] uid:String,
+}
 
 fn session_path(id:&str)->Result<std::path::PathBuf,String>{
     if id.len()!=64 || !id.bytes().all(|c|c.is_ascii_hexdigit()){return Err("WorkBuddy 账号标识无效".into());}
@@ -51,11 +59,12 @@ impl Failure {
 }
 fn api(agent:&ureq::Agent,session:&Session,path:&str)->Result<Value,Failure>{
     let url=format!("{}{path}",session.origin);
-    let req=agent.request(if path==SUMMARY{"POST"}else{"GET"},&url)
+    let mut req=agent.request(if path==SUMMARY{"POST"}else{"GET"},&url)
         .set("User-Agent",&session.ua).set("Cookie",&session.cookie).set("Accept","application/json").set("X-Client-Platform","web");
+    if let Some(auth)=&session.auth{
+        req=req.set("Authorization",&format!("Bearer {}",auth.access_token)).set("X-User-Id",&auth.uid).set("X-Domain",&auth.domain);
+    }
     let response=if path==SUMMARY{req.set("Content-Type","application/json").send_string("{}")}else{req.call()}.map_err(|e|match e{
-        // 302 会跳到登录页：说明这串 Cookie 已经不被官网认可了。
-        ureq::Error::Status(301|302|303|307|308,_)=>Failure::Expired,
         ureq::Error::Status(401,_)=>Failure::Expired,
         ureq::Error::Status(code,_)=>Failure::Message(format!("WorkBuddy 官网返回 {code}，请稍后重试")),
         _=>Failure::Transport
@@ -63,6 +72,10 @@ fn api(agent:&ureq::Agent,session:&Session,path:&str)->Result<Value,Failure>{
     serde_json::from_reader(response.into_reader().take(2*1024*1024)).map_err(|_|Failure::Message("WorkBuddy 官网返回了无效数据".into()))
 }
 fn verified(agent:&ureq::Agent,s:&Session,id:&str)->Result<Snapshot,Failure>{
+    if let Some(auth)=&s.auth{
+        if slot(&auth.uid)!=id{return Err(Failure::Message("WorkBuddy 授权账号不匹配".into()));}
+        return parse(&api(agent,s,SUMMARY)?).map_err(Failure::Message);
+    }
     let profile=api(agent,s,"/console/account")?;
     let uid=profile.pointer("/data/uid").and_then(Value::as_str).ok_or_else(||Failure::Message("官网未返回 WorkBuddy 账号信息".into()))?;
     if slot(uid)!=id || profile.pointer("/data/isCurrentOneIdEnterprise")==Some(&Value::Bool(true)){
@@ -72,11 +85,14 @@ fn verified(agent:&ureq::Agent,s:&Session,id:&str)->Result<Snapshot,Failure>{
 }
 fn query(agent:&ureq::Agent,s:&Session,id:&str)->Result<Snapshot,Failure>{
     if !valid_origin(&s.origin){return Err(Failure::Message("WorkBuddy 登录来源无效".into()));}
-    let result=verified(agent,s,id);
+    with_transport_retry(agent,&s.origin,|agent|verified(agent,s,id))
+}
+fn with_transport_retry<T>(agent:&ureq::Agent,origin:&str,request:impl Fn(&ureq::Agent)->Result<T,Failure>)->Result<T,Failure>{
+    let result=request(agent);
     if !matches!(result,Err(Failure::Transport)){return result;}
     // 仅在本地代理映射到基准测试地址且连接失败时重新解析；TLS 仍校验原官网域名。
     use std::net::{Ipv4Addr,SocketAddr,ToSocketAddrs};
-    let host=s.origin.trim_start_matches("https://");
+    let host=origin.trim_start_matches("https://");
     let mapped=(host,443).to_socket_addrs().ok().is_some_and(|mut addresses|addresses.any(|a|matches!(a,SocketAddr::V4(v) if v.ip().octets()[0]==198 && matches!(v.ip().octets()[1],18|19))));
     if !mapped{return result;}
     let lookup=format!("https://dns.alidns.com/resolve?name={host}&type=A");
@@ -87,182 +103,142 @@ fn query(agent:&ureq::Agent,s:&Session,id:&str)->Result<Snapshot,Failure>{
     let endpoint=format!("{host}:443");
     let direct=ureq::AgentBuilder::new().try_proxy_from_env(false).timeout(Duration::from_secs(12)).redirects(0)
         .resolver(move |name:&str|if name==endpoint{Ok(ips.clone())}else{Err(std::io::Error::other("官网地址不匹配"))}).build();
-    verified(&direct,s,id)
+    request(&direct)
+}
+// 只读取客户端当前会话；未知加密格式交给独立官网登录，不改写客户端文件。
+fn local_snapshot(agent:&ureq::Agent,expected:Option<&str>)->Result<(String,Snapshot),String>{
+    let base=std::env::var_os("LOCALAPPDATA").ok_or("未找到本机用户目录")?;
+    let path=std::path::PathBuf::from(base).join("CodeBuddyExtension/Data/Public/auth/workbuddy-desktop-ai.info");
+    if path.with_extension("info.logged-out").exists(){return Err("WorkBuddy 客户端已退出登录".into());}
+    let raw=std::fs::read(&path).map_err(|_|"未找到 WorkBuddy 客户端登录")?;
+    let root:Value=serde_json::from_slice(&raw).map_err(|_|"无法读取 WorkBuddy 客户端登录")?;
+    let uid=root.pointer("/account/uid").and_then(Value::as_str).ok_or("客户端尚未登录")?;
+    let id=slot(uid);
+    if expected.is_some_and(|s|s!=id){return Err("客户端当前账号与已绑定账号不同".into());}
+    if root.pointer("/account/isCurrentOneIdEnterprise")==Some(&Value::Bool(true)){return Err("请使用 WorkBuddy 个人账号".into());}
+    let token=root.pointer("/auth/accessToken").and_then(Value::as_str).filter(|s|!s.is_empty()).ok_or("客户端登录已加密，请通过官网连接")?;
+    let domain=root.pointer("/auth/domain").and_then(Value::as_str).unwrap_or_default();
+    let response=agent.post("https://www.codebuddy.cn/billing/meter/get-user-resource-summary")
+        .set("Authorization",&format!("Bearer {token}")).set("X-User-Id",uid).set("X-Domain",domain)
+        .set("Content-Type","application/json").send_string("{}").map_err(|_|"暂时无法使用客户端登录查询积分")?;
+    let value:Value=serde_json::from_reader(response.into_reader().take(2*1024*1024)).map_err(|_|"客户端积分响应无效")?;
+    Ok((id,parse(&value)?))
+}
+fn refresh_auth(agent:&ureq::Agent,session:&Session)->Result<Auth,Failure>{
+    let auth=session.auth.as_ref().ok_or(Failure::Expired)?;
+    let response=with_transport_retry(agent,&session.origin,|agent|{
+        agent.post(&format!("{}/v2/plugin/auth/token/refresh",session.origin))
+            .set("X-Refresh-Token",&auth.refresh_token).set("X-Auth-Refresh-Source","plugin")
+            .set("X-Domain",&auth.domain).set("Content-Type","application/json").send_string("{}")
+            .map_err(|e|match e{
+                ureq::Error::Transport(_)=>Failure::Transport,
+                ureq::Error::Status(401|403,_)=>Failure::Expired,
+                _=>Failure::Message("WorkBuddy 登录服务暂不可用，请稍后重试".into()),
+            })
+    })?;
+    let value:Value=serde_json::from_reader(response.into_reader().take(2*1024*1024)).map_err(|_|Failure::Message("WorkBuddy 刷新响应无效".into()))?;
+    let mut next:Auth=serde_json::from_value(value["data"].clone()).map_err(|_|Failure::Message("WorkBuddy 授权已失效，请重新连接".into()))?;
+    next.uid=auth.uid.clone();
+    if next.refresh_token.is_empty(){next.refresh_token=auth.refresh_token.clone();}
+    if next.domain.is_empty(){next.domain=auth.domain.clone();}
+    if next.access_token.is_empty(){return Err(Failure::Message("WorkBuddy 未返回有效刷新凭据".into()));}
+    Ok(next)
 }
 pub fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>{
     let id=account.slot.as_deref().ok_or(("请连接 WorkBuddy 浏览器账号".into(),0))?;
+    if let Ok((_,snapshot))=local_snapshot(agent,Some(id)){return Ok(snapshot);}
     let path=session_path(id).map_err(|e|(e,0))?;
-    match std::fs::read(path){
+    match std::fs::read(&path){
         Ok(bytes)=>{
             let raw=super::gemini::protect(&bytes,false).map_err(|e|(e,30))?;
-            let session:Session=serde_json::from_slice(&raw).map_err(|_|("保存的 WorkBuddy 会话无效，请重新连接".into(),0))?;
+            let mut session:Session=serde_json::from_slice(&raw).map_err(|_|("保存的 WorkBuddy 会话无效，请重新连接".into(),0))?;
             match query(agent,&session,id){
                 Ok(snapshot)=>return Ok(snapshot),
-                // 官网明确说登录过期：没有桥接服务就别再去试浏览器，直接给可操作的提示。
-                Err(Failure::Expired) if !bridge_available()=>{
-                    return Err(("WorkBuddy 登录已过期（Cookie 通常 30 天有效），请在账号菜单点「重新连接」并粘贴新的 Cookie".into(),0));
+                Err(Failure::Expired)=>{
+                    if session.auth.as_ref().is_some_and(|a|!a.refresh_token.is_empty()){
+                        match refresh_auth(agent,&session){
+                            Ok(next)=>{
+                                session.auth=Some(next);
+                                // 刷新令牌可能轮换，先保存，再查询积分，避免网络中断丢失新令牌。
+                                if std::fs::read(&path).ok().as_deref()==Some(bytes.as_slice()){
+                                    save_session(id,&session).map_err(|e|(e,30))?;
+                                }
+                                return query(agent,&session,id).map_err(|e|(e.message(),30));
+                            },
+                            Err(Failure::Expired)=>{},
+                            Err(e)=>return Err((e.message(),30)),
+                        }
+                    }
                 },
-                Err(Failure::Expired)=>{},
                 Err(e)=>return Err((e.message(),30))
             }
         },
         Err(e) if e.kind()==std::io::ErrorKind::NotFound=>{},
         Err(_)=>return Err(("无法读取已保存的 WorkBuddy 会话".into(),30))
     }
-    browser_snapshot(Some(id)).map(|(_,s)|s).map_err(|e|(e,30))
+    Err(("WorkBuddy 登录已过期或尚未连接，请点击重新连接".into(),60))
 }
-const BRIDGE_ADDR:&str="127.0.0.1:10086";
-const COOKIE_NAMES:[&str;4]=["session","session_2","cb_login_mode","cb_login_realm"];
-const DEFAULT_UA:&str="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0";
-/// 本机没装桥接服务时给出可操作的提示，而不是笼统的「扩展未响应」。
-const BRIDGE_MISSING:&str="未检测到浏览器连接服务（127.0.0.1:10086）。请安装或启用对应的浏览器扩展桥接，或改用下方「使用 Cookie 连接」（无需扩展）。";
-pub(crate) fn bridge_available()->bool{
-    let Ok(addr)=BRIDGE_ADDR.parse::<std::net::SocketAddr>()else{return false};
-    std::net::TcpStream::connect_timeout(&addr,Duration::from_millis(150)).is_ok()
-}
-fn bridge(agent:&ureq::Agent,action:&str,args:Value)->Result<Value,String>{
-    // 没有桥接服务时立刻返回，避免每次点击都干等 25 秒超时。
-    if !bridge_available(){return Err(if action=="list_browser_tabs"{BRIDGE_MISSING.into()}else{"浏览器连接服务已断开，请重新连接".into()});}
-    let response=agent.post("http://127.0.0.1:10086/command").set("Content-Type","application/json").send_string(&json!({"action":action,"args":args,"session":"daozai-workbuddy"}).to_string()).map_err(|_|if action=="list_browser_tabs"{"浏览器连接服务没有响应，请确认扩展已启用后重试"}else{"浏览器会话响应超时，稍后重试"})?;
-    let mut raw=String::new();response.into_reader().take(2*1024*1024).read_to_string(&mut raw).map_err(|_|"读取浏览器会话失败")?;
-    let value:Value=serde_json::from_str(&raw).map_err(|_|"浏览器连接服务返回无效数据")?;
-    if value["ok"]!=true{return Err("浏览器连接服务拒绝了请求，请确认扩展已启用后重试".into());}Ok(value["data"].clone())
-}
-fn browser_snapshot(expected:Option<&str>)->Result<(String,Snapshot),String>{
-    let agent=ureq::AgentBuilder::new().try_proxy_from_env(false).timeout(Duration::from_secs(25)).redirects(0).build();
-    let response=bridge(&agent,"list_browser_tabs",json!({}))?;
-    let mut tabs=response["tabs"].as_array().ok_or("无法读取浏览器标签页")?.iter().filter(|t|t["url"].as_str().and_then(|s|url::Url::parse(s).ok()).is_some_and(|u|valid_origin(&u.origin().ascii_serialization())&&u.path().starts_with("/profile"))).collect::<Vec<_>>();
-    tabs.sort_by_key(|t|!t["active"].as_bool().unwrap_or(false));
-    if expected.is_none()&&tabs.len()>1&&tabs[0]["active"]!=true{return Err("请激活要连接的 WorkBuddy 用量标签页后重试".into());}
-    if tabs.is_empty(){return Err("等待打开 WorkBuddy 官网用量页".into());}
-    let mut other_account=false;
-    for tab in tabs{
-        bridge(&agent,"attach_tab",json!({"tabId":tab["tabId"]}))?;
-        let result=bridge(&agent,"evaluate",json!({"code":"JSON.stringify({uid:sessionStorage.getItem('website-userId'),enterprise:sessionStorage.getItem('profile-enterpriseId'),origin:location.origin,ua:navigator.userAgent})"}))?;
-        let identity:Value=serde_json::from_str(result["value"].as_str().unwrap_or_default()).map_err(|_|"无法识别 WorkBuddy 登录账号")?;
-        let Some(uid)=identity["uid"].as_str().filter(|s|!s.is_empty())else{continue;};
-        let current=slot(uid);if expected.is_some_and(|id|id!=current){other_account=true;continue;}
-        if identity["enterprise"].as_str().is_some_and(|s|!s.is_empty()){return Err("请切换到个人账号，企业积分暂不支持".into());}
-        if !identity["origin"].as_str().is_some_and(valid_origin){return Err("请在 WorkBuddy 官网连接".into());}
-        let origin=identity["origin"].as_str().unwrap();
-        let cookies=bridge(&agent,"cdp",json!({"method":"Network.getCookies","params":{"urls":[format!("{origin}{SUMMARY}")]}}))?;
-        let cookie=cookies["cookies"].as_array().into_iter().flatten().filter_map(|c|{
-            if c["path"].as_str()!=Some("/"){return None;}
-            let name=c["name"].as_str()?;
-            if !COOKIE_NAMES.contains(&name){return None;}
-            let value=c["value"].as_str()?;if value.contains([';','\r','\n']){return None;}
-            Some(format!("{name}={value}"))
-        }).collect::<Vec<_>>().join("; ");
-        let session=Session{origin:origin.into(),ua:identity["ua"].as_str().ok_or("无法读取浏览器版本")?.into(),cookie};
-        let snapshot=query(&super::http_agent(),&session,&current).map_err(Failure::message)?;
-        save_session(&current,&session)?;
-        return Ok((current,snapshot));
-    }
-    Err(if other_account{"浏览器当前打开了其他 WorkBuddy 账号，请打开已绑定账号的用量页"}else{"等待 WorkBuddy 用量页恢复登录，请打开官网确认登录状态"}.into())
-}
+#[cfg(windows)]
+#[path="workbuddy_login.rs"]
+mod login;
 
-/// 只保留官网登录需要的 Cookie，避免把浏览器里的其它站点凭据一起存下来。
-fn cookie_header(raw:&str)->Result<String,String>{
-    let raw=raw.trim();
-    let raw=raw.strip_prefix("Cookie:").or_else(||raw.strip_prefix("cookie:")).unwrap_or(raw).trim();
-    if raw.is_empty(){return Err("请先粘贴 Cookie 请求头".into());}
-    // 浏览器里复制出来的 Cookie 偶尔带换行，先折叠成一行再解析。
-    let collapsed=raw.replace(['\r','\n'],"; ");
-    let raw=collapsed.trim().trim_end_matches(';').trim();
-    if raw.is_empty(){return Err("Cookie 内容无效".into());}
-    // 只粘贴 session 的值也接受：没有 name=value 结构时按 session 值处理。
-    if !raw.contains('='){
-        if raw.contains([';','"','\r','\n'])||raw.split_whitespace().count()>1{
-            return Err("Cookie 格式无效，请复制完整的请求头，或粘贴带 session= 前缀的值".into());
-        }
-        return Ok(format!("session={raw}"));
-    }
-    let mut kept=Vec::new();
-    for part in raw.split(';'){
-        let part=part.trim();
-        if part.is_empty(){continue;}
-        let Some((name,value))=part.split_once('=') else{return Err("Cookie 格式无效，请复制完整的请求头".into());};
-        let (name,value)=(name.trim(),value.trim());
-        if !COOKIE_NAMES.contains(&name){continue;}
-        if value.is_empty()||value.contains([';','"','\r','\n']){return Err("Cookie 内容无效".into());}
-        kept.push(format!("{name}={value}"));
-    }
-    if !kept.iter().any(|s|s.starts_with("session=")||s.starts_with("session_2=")){
-        return Err("Cookie 里没有找到登录凭据（session），请确认复制的是官网用量页请求".into());
-    }
-    Ok(kept.join("; "))
-}
-fn verify_manual(agent:&ureq::Agent,session:&Session,expected:Option<&str>)->Result<(String,Snapshot),String>{
-    let profile=api(agent,session,"/console/account").map_err(Failure::message)?;
-    let uid=profile.pointer("/data/uid").and_then(Value::as_str).filter(|s|!s.is_empty())
-        .ok_or_else(||"官网未返回 WorkBuddy 账号信息，请确认已登录并复制完整 Cookie".to_string())?;
-    let id=slot(uid);
-    if expected.is_some_and(|e|e!=id){return Err("当前 Cookie 属于另一个 WorkBuddy 账号，请切回原账号后重试".into());}
-    if profile.pointer("/data/isCurrentOneIdEnterprise")==Some(&Value::Bool(true)){return Err("企业账号暂不支持，请切换到个人账号".into());}
-    let value=api(agent,session,SUMMARY).map_err(Failure::message)?;
-    Ok((id,parse(&value)?))
-}
-/// 不依赖浏览器扩展：用户复制官网 Cookie，岛仔验证账号与积分后安全保存会话。
-pub fn connect_with_cookie(alias:String,header:&str,expected:Option<String>)->Result<Connected,String>{
-    let cookie=cookie_header(header)?;
-    let agent=super::http_agent();
-    let mut last=String::new();
-    // 两个官网域名都兼容，用户不必判断自己登录的是哪一个。
-    for origin in ["https://www.codebuddy.cn","https://www.workbuddy.cn"]{
-        let session=Session{origin:origin.into(),ua:DEFAULT_UA.into(),cookie:cookie.clone()};
-        match verify_manual(&agent,&session,expected.as_deref()){
-            Ok((id,snapshot))=>{
-                save_session(&id,&session)?;
-                return Ok(Connected{slot:id,label:if alias.trim().is_empty(){"WorkBuddy".into()}else{alias.trim().into()},snapshot});
-            },
-            Err(error)=>{if last.is_empty()||!error.contains("暂时无法连接"){last=error;}},
-        }
-    }
-    Err(last)
-}
-/// 轻量校验：只确认这串 Cookie 现在真的能登进官网，不保存、不读积分。
-pub fn probe_cookie(header:&str)->Result<(),String>{
-    let cookie=cookie_header(header)?;
-    let agent=ureq::AgentBuilder::new().try_proxy_from_env(false).timeout(Duration::from_secs(10)).redirects(0).build();
-    let mut last=String::from("官网还没识别到登录状态");
-    for origin in ["https://www.codebuddy.cn","https://www.workbuddy.cn"]{
-        let session=Session{origin:origin.into(),ua:DEFAULT_UA.into(),cookie:cookie.clone()};
-        match api(&agent,&session,"/console/account"){
-            Ok(value)=>if value.pointer("/data/uid").and_then(Value::as_str).is_some_and(|uid|!uid.is_empty()){return Ok(());}else{last="官网还没识别到登录状态".into();},
-            Err(Failure::Expired)=>{},
-            Err(Failure::Transport)=>last="暂时无法连接 WorkBuddy 官网".into(),
-            Err(Failure::Message(message))=>last=message,
-        }
-    }
-    Err(last)
-}
 pub struct Connected {pub slot:String,pub label:String,pub snapshot:Snapshot}
-pub struct Connect {rx:mpsc::Receiver<Result<Connected,String>>}
+pub struct Connect {rx:mpsc::Receiver<Result<Connected,String>>,cancel:std::sync::Arc<std::sync::atomic::AtomicBool>}
+impl Drop for Connect {fn drop(&mut self){self.cancel.store(true,std::sync::atomic::Ordering::Relaxed);}}
 impl Connect {
     pub fn start(alias:String,expected:Option<String>)->Self{
-        let(tx,rx)=mpsc::channel();std::thread::spawn(move||{let result=(||{
-            let (slot,snapshot)=browser_snapshot(expected.as_deref())?;
+        let(tx,rx)=mpsc::channel();
+        let cancel=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_cancel=cancel.clone();
+        std::thread::spawn(move||{let result=(||{
+            let local=local_snapshot(&super::http_agent(),expected.as_deref());
+            #[cfg(windows)]
+            let (slot,snapshot)=match local{
+                Ok(result)=>result,
+                Err(_)=>login::connect(expected.as_deref(),worker_cancel)?,
+            };
+            #[cfg(not(windows))]
+            let (slot,snapshot):(String,Snapshot)=return Err("WorkBuddy 登录暂仅支持 Windows".into());
             Ok(Connected{slot,label:if alias.trim().is_empty(){"WorkBuddy".into()}else{alias.trim().into()},snapshot})
-        })();let _=tx.send(result);});Self{rx}
-    }
-    /// 无浏览器扩展时的连接入口。
-    pub fn start_with_cookie(alias:String,header:String,expected:Option<String>)->Self{
-        let(tx,rx)=mpsc::channel();std::thread::spawn(move||{
-            let result=connect_with_cookie(alias,&header,expected);
-            let _=tx.send(result);
-        });Self{rx}
+        })();let _=tx.send(result);});Self{rx,cancel}
     }
     pub fn poll(&self)->Option<Result<Connected,String>>{self.rx.try_recv().ok()}
 }
 #[cfg(test)]mod tests{
     use super::*;use serde_json::json;
     #[test]
-    #[ignore="显式连接本机浏览器 WorkBuddy 账号并保存配置"]
-    fn workbuddy_live_connect_local(){
-        let (slot,snapshot)=browser_snapshot(None).expect("官网查询");
-        let (_,second)=browser_snapshot(Some(&slot)).expect("账号绑定刷新");assert!(second.credits.is_some());
-        if std::env::var("DAOZAI_WORKBUDDY_SAVE_ACCOUNT").as_deref()==Ok("1"){let mut config=super::super::Config::load();config.connect_workbuddy(slot,"WorkBuddy · 个人".into());config.save();}
-        println!("官网查询成功，可用积分={}，分类={}，账号绑定刷新已验证",snapshot.credits.as_ref().unwrap().remaining,snapshot.credits.as_ref().unwrap().packages.len());
+    fn workbuddy_old_cookie_sessions_remain_readable(){
+        let session:Session=serde_json::from_value(json!({"origin":"https://www.codebuddy.cn","ua":"test","cookie":"session=test"})).unwrap();
+        assert!(session.auth.is_none());
+        assert_eq!(session.cookie,"session=test");
+    }
+    #[test]
+    #[ignore="手动验证默认浏览器官网登录，需用户完成登录"]
+    fn workbuddy_login_without_extension(){
+        let config=super::super::Config::load();
+        let expected=config.accounts.iter().find(|a|a.enabled&&a.provider==super::super::Provider::WorkBuddy).and_then(|a|a.slot.as_deref());
+        let cancel=std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let result=if let Ok(state)=std::env::var("DAOZAI_TEST_WORKBUDDY_STATE"){
+            login::wait_for_login(&super::super::http_agent(),&state,expected,cancel)
+        }else{login::connect(expected,cancel)};
+        let (id,snapshot)=result.expect("官网登录");
+        assert!(snapshot.credits.is_some());
+        let bytes=std::fs::read(session_path(&id).unwrap()).unwrap();
+        let session:Session=serde_json::from_slice(&super::super::gemini::protect(&bytes,false).unwrap()).unwrap();
+        assert!(query(&super::super::http_agent(),&session,&id).map_err(Failure::message).unwrap().credits.is_some());
+    }
+    #[test]
+    #[ignore="手动验证官网登录续期并保存新会话"]
+    fn workbuddy_refresh_saved_login(){
+        let config=super::super::Config::load();
+        let a=config.accounts.iter().find(|a|a.enabled&&a.provider==super::super::Provider::WorkBuddy).unwrap();
+        let id=a.slot.as_deref().unwrap();
+        let bytes=std::fs::read(session_path(id).unwrap()).unwrap();
+        let mut session:Session=serde_json::from_slice(&super::super::gemini::protect(&bytes,false).unwrap()).unwrap();
+        let agent=super::super::http_agent();
+        session.auth=Some(refresh_auth(&agent,&session).map_err(Failure::message).unwrap());
+        save_session(id,&session).unwrap();
+        assert!(fetch(&agent,a).unwrap().credits.is_some());
     }
     #[test]
     #[ignore="只使用已保存的官网会话验证积分，不连接浏览器"]
@@ -279,17 +255,5 @@ impl Connect {
         let s=parse(&json!({"code":0,"data":{"Packages":[{"PackageCode":"base","CycleRemainCapacity":"1200"},{"PackageCode":"gift","CycleRemainCapacity":80}]}})).unwrap();let c=s.credits.unwrap();assert_eq!(c.remaining,1280.0);assert_eq!(c.compact(),"1.28k");assert_eq!(c.full(),"1,280");
         for v in [json!({"code":0}),json!({"code":401}),json!({"code":0,"data":{"Packages":[{}]}}),json!({"code":0,"data":{"Packages":[{"CycleRemainCapacity":-1}]}})]{assert!(parse(&v).is_err());}
         assert_eq!(parse(&json!({"code":0,"data":{"Packages":[]}})).unwrap().credits.unwrap().remaining,0.0);
-    }
-    #[test]fn workbuddy_cookie_header_keeps_only_login_cookies(){
-        assert_eq!(cookie_header("Cookie: session=abc; foo=bar; session_2=def; cb_login_mode=1").unwrap(),"session=abc; session_2=def; cb_login_mode=1");
-        assert_eq!(cookie_header("  session=abc  ").unwrap(),"session=abc");
-        for bad in ["", "foo=bar", "session=", "session=abc\r\nX: y", "session=a\"b"]{assert!(cookie_header(bad).is_err(),"{bad}");}
-    }
-    #[test]fn workbuddy_bridge_error_is_actionable_without_extension(){
-        if bridge_available(){return;} // 开发机装了桥接服务时跳过
-        let agent=ureq::AgentBuilder::new().timeout(Duration::from_secs(2)).build();
-        let error=bridge(&agent,"list_browser_tabs",json!({})).unwrap_err();
-        assert!(error.contains("Cookie 连接"),"{error}");
-        assert!(!error.contains("Kimi"),"{error}");
     }
 }

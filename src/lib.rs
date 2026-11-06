@@ -29,7 +29,6 @@ pub mod side_dock;
 mod task_picker;
 pub mod model;
 pub mod timers;
-pub mod browser_login;
 pub mod smoke;
 pub mod otp;
 pub mod quota;

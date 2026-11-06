@@ -1,4 +1,4 @@
-﻿//! 同心额度环、账号选择及账号设置。
+//! 同心额度环、账号选择及账号设置。
 use crate::{app::{App,Cmd},extras::{setting_row,settings_card,settings_control_row},paint::{Card,H},quota::{self,Accent,Account,Config,Provider,Snapshot},theme::{self,W}};
 use eframe::egui::{self,Color32};
 use std::collections::{HashMap,HashSet};
@@ -11,8 +11,7 @@ pub(crate) struct State {
     pub provider:Provider,pub alias:String,pub source:String,pub note:String,
     pub connect_open:bool,pub connect_target:Option<String>,
     pub login:Option<quota::grok::Login>,
-    pub workbuddy_connecting:Option<quota::workbuddy::Connect>,pub workbuddy_cookie:String,
-    pub workbuddy_login:Option<crate::browser_login::BrowserLogin>,
+    pub workbuddy_connecting:Option<quota::workbuddy::Connect>,
     pub deepseek_connecting:Option<quota::deepseek::Connect>,pub deepseek_key:String,
     pub stale:HashMap<String,String>,
     pub gemini_connecting:Option<quota::gemini::Connect>,pub gemini_email:String,pub gemini_cookie:String,
@@ -173,36 +172,11 @@ fn reset_text(at:Option<i64>,now:&chrono::DateTime<chrono::Local>)->String {
     let format=if at.date_naive()==now.date_naive(){"今天 %H:%M 重置"}else if at.year()==now.year(){"%-m月%-d日 %H:%M 重置"}else{"%Y/%-m/%-d %H:%M 重置"};
     at.format(format).to_string()
 }
-/// 桥接服务的在线状态每 3 秒探一次即可，别让设置窗口每帧去连 10086。
-fn bridge_online(ctx:&egui::Context)->bool{
-    let id=egui::Id::new("workbuddy-bridge-probe");
-    let now=ctx.input(|input|input.time);
-    let (at,online):(f64,bool)=ctx.data(|data|data.get_temp(id).unwrap_or((-10.0,false)));
-    if now-at>3.0{
-        let online=quota::workbuddy::bridge_available();
-        ctx.data_mut(|data|data.insert_temp(id,(now,online)));
-        online
-    }else{online}
-}
-
 impl App {
     pub(crate) fn quota_tick(&mut self){
-        if let Some(result)=self.quota.workbuddy_login.as_mut().and_then(|login|login.poll(chrono::Local::now().timestamp())){
-            self.quota.workbuddy_login=None;
-            match result{
-                Ok(cookie)=>{
-                    let expected=self.quota.connect_target.as_ref().and_then(|id|self.quota.config.accounts.iter().find(|a|&a.id==id)).and_then(|a|a.slot.clone());
-                    self.quota.workbuddy_cookie=cookie.clone();
-                    self.quota.note="已读取登录态，正在验证积分…".into();
-                    self.quota.workbuddy_connecting=Some(quota::workbuddy::Connect::start_with_cookie(self.quota.alias.clone(),cookie,expected));
-                },
-                Err(error)=>self.quota.note=error,
-            }
-        }
         if let Some(result)=self.quota.workbuddy_connecting.as_ref().and_then(|c|c.poll()){
             self.quota.workbuddy_connecting=None;
             match result{Ok(connected)=>{
-                self.quota.workbuddy_cookie.clear(); // 连接成功后不再把明文 Cookie 留在输入框里
                 let id=self.quota.config.connect_workbuddy(connected.slot,connected.label);self.quota.stale.remove(&id);self.quota.rows.insert(id,Ok(connected.snapshot));self.quota.save_snapshots();self.quota.connect_target=None;self.quota.config.save();self.quota.note="WorkBuddy 已连接".into();self.pending.push(Cmd::QuotaConnected);
             },Err(error)=>self.quota.note=error}
         }
@@ -442,66 +416,14 @@ impl App {
             settings_control_row(ui,"备注",56.0,|ui|{ui.add_sized([ui.available_width(),27.0],egui::TextEdit::singleline(&mut self.quota.alias).vertical_align(egui::Align::Center).hint_text("例如：个人、工作、备用"))});
             if self.quota.provider==Provider::WorkBuddy{
                 ui.label("连接官网个人账号，查看剩余积分。");
-                ui.add(egui::Label::new(egui::RichText::new("下面三种方式任选其一，互不冲突；已连接的账号随时可以重新连接换一种。").size(11.0).color(ui.visuals().weak_text_color())).wrap());
                 ui.horizontal(|ui|{
-                    if ui.add_enabled(self.quota.workbuddy_login.is_none()&&self.quota.workbuddy_connecting.is_none(),egui::Button::new("自动获取登录态")).clicked(){
-                        match crate::browser_login::BrowserLogin::start(){
-                            Ok(login)=>{self.quota.workbuddy_login=Some(login);self.quota.note="已打开专属登录窗口：在里面登录 WorkBuddy，登录成功后岛仔会自动读取，不用复制 Cookie（窗口留着或关掉都行）".into();},
-                            Err(error)=>self.quota.note=error,
-                        }
-                    }
-                    if self.quota.workbuddy_login.is_some()&&ui.button("取消").clicked(){
-                        if let Some(mut login)=self.quota.workbuddy_login.take(){login.cancel();}
-                        self.quota.note="已取消自动获取".into();
-                    }
-                    if ui.button("打开官网").clicked(){self.pending.push(Cmd::OpenUrl("https://www.codebuddy.cn/profile/usage".into()));}
-                });
-                if let Some(login)=self.quota.workbuddy_login.as_ref(){
-                    let hint=login.hint().map(|h|format!("还没读到可用的登录态（{h}），请确认已完成登录")).unwrap_or_else(||"等待登录…登录成功后会自动读取，不用关闭窗口".into());
-                    ui.horizontal(|ui|{
-                        ui.spinner();
-                        ui.label(egui::RichText::new(hint).size(12.0).color(ui.visuals().weak_text_color()));
-                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(400));
-                    });
-                }
-                ui.add(egui::Label::new(egui::RichText::new("自动获取会用独立配置的 Edge 窗口打开官网，不读取你日常浏览器的 Cookie，也不改动它；登录一次后，后续刷新都用本机保存的会话。").size(11.0).color(ui.visuals().weak_text_color())).wrap());
-                egui::CollapsingHeader::new("手动粘贴 Cookie（没有 Edge 时可用）").default_open(false).show(ui,|ui|{
-                    ui.add(egui::Label::new(egui::RichText::new("在已登录的官网用量页按 F12 → 网络（Network）→ 刷新 → 点任一官网请求 → 复制请求头里的 Cookie。嫌麻烦的话，只复制 session 这一条的值也可以。").size(12.0)).wrap());
-                    ui.add_sized([ui.available_width(),27.0],egui::TextEdit::singleline(&mut self.quota.workbuddy_cookie).vertical_align(egui::Align::Center).password(true).hint_text("粘贴 Cookie 请求头，或只粘贴 session 的值"));
-                    ui.horizontal(|ui|{
-                        if ui.add_enabled(self.quota.workbuddy_connecting.is_none()&&!self.quota.workbuddy_cookie.trim().is_empty(),egui::Button::new("验证并连接")).clicked(){
-                            let expected=self.quota.connect_target.as_ref().and_then(|id|self.quota.config.accounts.iter().find(|a|&a.id==id)).and_then(|a|a.slot.clone());
-                            self.quota.note.clear();
-                            self.quota.workbuddy_connecting=Some(quota::workbuddy::Connect::start_with_cookie(self.quota.alias.clone(),self.quota.workbuddy_cookie.clone(),expected));
-                        }
-                        if ui.button("打开官网用量页").clicked(){self.pending.push(Cmd::OpenUrl("https://www.codebuddy.cn/profile/usage".into()));}
-                    });
-                    ui.add(egui::Label::new(egui::RichText::new("只保留 session 等 4 个登录 Cookie，其余站点凭据会被丢弃；会话用 Windows DPAPI 加密后存在本机，只会发回 WorkBuddy 官网，不会上传到别处。登录态通常 30 天有效，过期后这里会提示重新获取。").size(11.0).color(ui.visuals().weak_text_color())).wrap());
-                });
-                let online=bridge_online(ui.ctx());
-                let bridge_title=if online{"用浏览器扩展连接（原作者方案） · 已检测到桥接服务"}else{"用浏览器扩展连接（原作者方案，需装 Kimi WebBridge）"};
-                egui::CollapsingHeader::new(bridge_title).default_open(online).show(ui,|ui|{
-                    if online{
-                        ui.add(egui::Label::new(egui::RichText::new("已检测到本机 127.0.0.1:10086 的浏览器连接服务，可用日常浏览器里已登录的官网标签页完成连接；若仍提示失败，请检查浏览器扩展是否已连上服务。").size(11.0).color(Color32::from_rgb(118,196,151))).wrap());
-                    }else{
-                        ui.add(egui::Label::new(egui::RichText::new("这条通道是原仓库用的桥：岛仔只是客户端，需要本机先装 Kimi WebBridge（浏览器扩展 + 本地服务，监听 127.0.0.1:10086）。没装就用上面的自动获取或手动 Cookie，功能是等价的。").size(11.0).color(ui.visuals().weak_text_color())).wrap());
-                        ui.horizontal_wrapped(|ui|{
-                            if ui.button("复制 Windows 安装命令").clicked(){
-                                let command="irm https://cdn.kimi.com/webbridge/install.ps1 | iex";
-                                ui.output_mut(|out|out.copied_text=command.into());
-                                self.quota.note="已复制安装命令：在 PowerShell 里执行后，再装 Chrome/Edge 的 Kimi WebBridge 扩展".into();
-                            }
-                            if ui.link("打开官方安装说明").clicked(){self.pending.push(Cmd::OpenUrl("https://www.kimi.com/zh-cn/features/webbridge".into()));}
-                        });
-                        ui.add(egui::Label::new(egui::RichText::new("安装命令不会由岛仔自动执行；请以官方页面的最新说明为准。").size(10.5).color(ui.visuals().weak_text_color())).wrap());
-                    }
-                    if ui.add_enabled(self.quota.workbuddy_connecting.is_none()&&online,egui::Button::new("连接当前浏览器")).on_hover_text(if online{"用已登录的官网标签页连接"}else{"需要先安装并启动浏览器桥接服务"}).clicked(){
-                        let expected=self.quota.connect_target.as_ref().and_then(|id|self.quota.config.accounts.iter().find(|a|&a.id==id)).and_then(|a|a.slot.clone());
-                        self.quota.note.clear();
-                        self.quota.workbuddy_connecting=Some(quota::workbuddy::Connect::start(self.quota.alias.clone(),expected));
+                    if ui.button("打开官网用量页").clicked(){self.pending.push(Cmd::OpenUrl("https://www.codebuddy.cn/profile/usage".into()));}
+                    if ui.add_enabled(self.quota.workbuddy_connecting.is_none(),egui::Button::new("登录并连接")).clicked(){
+                        let expected=self.quota.connect_target.as_ref().and_then(|id|self.quota.config.accounts.iter().find(|a|&a.id==id)).and_then(|a|a.slot.clone());self.quota.note.clear();self.quota.workbuddy_connecting=Some(quota::workbuddy::Connect::start(self.quota.alias.clone(),expected));
                     }
                 });
-                if self.quota.workbuddy_connecting.is_some(){ui.spinner();ui.label("正在验证积分…");ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));}
+                ui.label(egui::RichText::new("自动识别本机登录；需要授权时打开默认浏览器。登录状态加密保存在本机。").size(12.0).color(ui.visuals().weak_text_color()));
+                if self.quota.workbuddy_connecting.is_some(){ui.horizontal(|ui|{ui.spinner();ui.label("请在默认浏览器完成官网登录…");if ui.button("取消").clicked(){self.quota.workbuddy_connecting=None;self.quota.note="已取消 WorkBuddy 连接".into();}});ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));}
             }else if self.quota.provider==Provider::DeepSeek{
                 ui.label("查询 API 账户余额，密钥仅保存在本机。");
                 ui.add_sized([ui.available_width(),27.0],egui::TextEdit::singleline(&mut self.quota.deepseek_key).password(true).hint_text("粘贴 API Key"));
@@ -510,7 +432,7 @@ impl App {
             }else if self.quota.provider==Provider::Gemini{
                 ui.label(egui::RichText::new("读取 Gemini 网页的 5 小时与每周额度。").size(12.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(180),Color32::from_gray(75))));
                 ui.horizontal(|ui|{if ui.button("打开 Gemini 用量").clicked(){self.pending.push(Cmd::OpenUrl("https://gemini.google.com/usage".into()));}if ui.add_enabled(self.quota.gemini_connecting.is_none(),egui::Button::new("连接当前浏览器")).clicked(){self.quota.gemini_connecting=Some(quota::gemini::Connect::start(self.quota.alias.clone(),self.quota.gemini_email.clone(),None,self.quota.connect_target.as_ref().and_then(|id|self.quota.config.accounts.iter().find(|a|&a.id==id)).and_then(|a|a.slot.clone())));}});
-                ui.label(egui::RichText::new("「连接当前浏览器」需要本机浏览器连接服务；没有扩展时可用下方 Cookie 连接。").size(12.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(180),Color32::from_gray(75))));
+                ui.label(egui::RichText::new("浏览器连接需要 Kimi 浏览器扩展；连接后可独立刷新。").size(12.0).color(crate::settings_theme::color(ui.ctx(),Color32::from_gray(180),Color32::from_gray(75))));
                 settings_control_row(ui,"Google 邮箱",80.0,|ui|{ui.add_sized([ui.available_width(),27.0],egui::TextEdit::singleline(&mut self.quota.gemini_email).vertical_align(egui::Align::Center).hint_text("多账号时填写要连接的邮箱"))});
                 ui.collapsing("使用 Cookie 连接",|ui|{
                     ui.label("在 Gemini 用量页按 F12，打开网络，刷新后找到 executeQuery 请求，复制 Cookie 请求头。");
