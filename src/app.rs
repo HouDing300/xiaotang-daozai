@@ -1856,8 +1856,9 @@ impl App {
         let ambient=self.settings.skin==model::Skin::Fluid && self.fluid.animating() || self.pomo.running && (self.open && self.page==1 || !self.open && !minimal_pill && self.notice.is_none() && bar::animations_enabled())
             || self.media.playing && (self.open && self.page==0 || !self.open && !minimal_pill && self.notice.is_none() && self.media.is_music())
             || self.notice.as_ref().is_some_and(|notice|notice.meeting.is_some());
-        // 站立/抽烟页的小人与烟雾、以及定时提醒卡片里的图标都是逐帧动画，
+        // 站立/抽烟页的小人与烟雾、以及这两类通知卡片里的图标是逐帧动画，
         // 原来落进「静态界面 1 秒一帧」，看起来就像卡住了；这里单独提到 60 帧。
+        // 自定义定时的秒表是静态的，不进这一档，免得白白 60 帧重绘。
         let icon_anim=bar::animations_enabled() && (
             self.open && matches!(self.page,STAND_PAGE|SMOKE_PAGE)
             || self.notice.as_ref().is_some_and(|a|a.timer_id.as_deref().is_some_and(|id|
