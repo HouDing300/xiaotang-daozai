@@ -710,7 +710,7 @@ pub struct App {
     /// v0.5.5：邮件账号、最近邮件与设置表单。
     pub(crate) mail: MailState,
     /// 邮件正文排版缓存：长邮件几百段，不能每帧重新解析一次。
-    mail_lines_cache: Option<(std::sync::Arc<str>, u32, std::sync::Arc<Vec<crate::mail_format::Line>>)>,
+    mail_lines_cache: Option<(std::sync::Arc<str>, std::sync::Arc<str>, u32, std::sync::Arc<Vec<crate::mail_format::Line>>)>,
     /// v0.5.6：日历（CalDAV）配置、未来 24 小时事件与设置表单。
     pub(crate) calendar: CalendarState,
     pub(crate) quota: crate::quota_ui::State,
@@ -842,12 +842,17 @@ impl App {
     pub(crate) fn reveal_mail_code(&mut self,item:&mail::Item){self.mail.privacy.reveal(item,self.t);}
     /// 同一封邮件、同一段正文只解析一次排版，避免每帧重复切分几百个段落。
     pub(crate) fn mail_body_lines(&mut self, item: &mail::Item) -> std::sync::Arc<Vec<crate::mail_format::Line>> {
-        // display_mail 每帧只 clone Arc，指针相同就说明是同一段正文，连哈希都不用算。
-        let hit = self.mail_lines_cache.as_ref().is_some_and(|(text, uid, _)| *uid == item.uid && std::sync::Arc::ptr_eq(text, &item.summary));
+        // display_mail 每帧只 clone Arc：正文与 HTML 原文的指针都不变就说明是同一封邮件，
+        // 长邮件不必每帧重新哈希几十 KB，更不必重新跑正则解析。
+        let hit = self.mail_lines_cache.as_ref().is_some_and(|(summary, html, uid, _)|
+            *uid == item.uid
+            && std::sync::Arc::ptr_eq(summary, &item.summary)
+            && std::sync::Arc::ptr_eq(html, &item.html));
         if !hit {
-            self.mail_lines_cache = Some((item.summary.clone(), item.uid, std::sync::Arc::new(crate::mail_format::item_lines(item))));
+            self.mail_lines_cache = Some((item.summary.clone(), item.html.clone(), item.uid,
+                std::sync::Arc::new(crate::mail_format::item_lines(item))));
         }
-        self.mail_lines_cache.as_ref().unwrap().2.clone()
+        self.mail_lines_cache.as_ref().unwrap().3.clone()
     }
 
     pub(crate) fn display_mail(&self,item:&mail::Item)->mail::Item {
@@ -857,6 +862,10 @@ impl App {
                 safe.subject=crate::mail_privacy::mask(&safe.subject,code);
                 safe.from=crate::mail_privacy::mask(&safe.from,code);
                 safe.summary=self.mail.privacy.masked_body(item);
+                // HTML 原文里可能还有未遮蔽的验证码，隐藏时必须一起丢弃。
+                // 用共享的空 Arc，让排版缓存对隐藏邮件也能按指针命中，不必每帧重解析。
+                static EMPTY: std::sync::OnceLock<std::sync::Arc<str>> = std::sync::OnceLock::new();
+                safe.html=EMPTY.get_or_init(||std::sync::Arc::from("")).clone();
                 safe.links.clear(); // Avoid tooltip/URL/copy leaks while hidden.
                 if let Some(event)=&mut safe.meeting {event.title=crate::mail_privacy::mask(&event.title,code);}
                 safe.code=None;
@@ -1143,7 +1152,7 @@ impl App {
                 subject: (*subject).into(),
                 time: (*time).into(),
                 code: if with_code { (*code).map(str::to_string) } else { None },
-                summary: (*summary).into(),
+                html: String::new().into(),summary: (*summary).into(),
                 links: Vec::new(),
                 meeting: meeting.as_ref().map(|(start, at)| mail::Meeting { all_day:false, end:None, title: "周五方案评审".into(), start: *start, at: at.clone(), uid: "demo-ics-1".into() }),
                 uid: 900 - i as u32,
@@ -1705,7 +1714,7 @@ impl App {
                 if a.source!=crate::extras::AlertSource::Internal {
                     paint::bell(&c.scaled(18.0,15.0,0.85),18.0,15.0,theme::WHITE,paint::bell_swing(self.t-a.at));
                     c.circle(22.0,10.5,2.0,Color32::from_rgb(255,72,72));
-                }else{crate::extras::notice_badge(&c,18.0,15.0,&a);}
+                }else{crate::extras::notice_badge(&c,18.0,15.0,&a,self.t);}
                 let button=crate::quota_ui::bar_tooltip(c.hit(0.0,0.0,36.0,BAR_H,"notice-badge"),format!("{}\n{}",a.title,a.body));
                 if button.clicked(){self.notice_details=!self.notice_details;}
             }else if self.t<self.notification_bell_until {
@@ -1851,7 +1860,8 @@ impl App {
         // 原来落进「静态界面 1 秒一帧」，看起来就像卡住了；这里单独提到 60 帧。
         let icon_anim=bar::animations_enabled() && (
             self.open && matches!(self.page,STAND_PAGE|SMOKE_PAGE)
-            || self.notice.as_ref().is_some_and(|notice|notice.timer_id.is_some())
+            || self.notice.as_ref().is_some_and(|a|a.timer_id.as_deref().is_some_and(|id|
+                id==crate::timers::STAND_ID||id==crate::timers::SMOKE_ID))
         );
         let animating=transitioning || ambient || icon_anim || pet_visible && self.pet.state!=PetState::Sleeping;
         // 交互形变与图标动画保持 60 帧，媒体 30 帧；小表情 20 帧，睡眠 10 帧，静态界面每秒核对提醒。

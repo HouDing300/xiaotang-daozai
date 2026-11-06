@@ -63,12 +63,12 @@ pub(crate) fn device_icon(c: &Card, kind: crate::bt::DeviceKind, x: f32, y: f32,
 
 pub(crate) use crate::pet::PetState;
 
-pub(crate) fn notice_badge(c:&Card,x:f32,y:f32,a:&Alert){
+pub(crate) fn notice_badge(c:&Card,x:f32,y:f32,a:&Alert,t:f64){
     if a.source==AlertSource::Internal && a.title=="蓝牙设备"{
         c.circle(x,y,11.0,if a.body.contains("已断开"){Color32::from_gray(95)}else{theme::BLUE});
         device_icon(c,a.bluetooth.map_or(crate::bt::DeviceKind::Other,|v|v.0),x-7.5,y-7.5,15.0);
-    }else if a.timer_id.is_some(){notice_icon(c,x,y,a);}
-    else{notice_icon(&c.scaled(x,y,0.85),x,y,a);}
+    }else if a.timer_id.is_some(){notice_icon(c,x,y,a,t);}
+    else{notice_icon(&c.scaled(x,y,0.85),x,y,a,t);}
 }
 pub(crate) fn messenger_icon(c:&Card,x:f32,y:f32,source:crate::app::Messenger){
 
@@ -91,10 +91,14 @@ pub(crate) fn messenger_icon(c:&Card,x:f32,y:f32,source:crate::app::Messenger){
     }
 }
 /// 提醒卡片左侧的图标。定时类提醒按来源分成三种：站立小人、点着的烟、普通定时器。
-fn notice_icon(c:&Card,x:f32,y:f32,a:&Alert) {
+/// 提醒动画经过的时间，必须与 `a.at` 同源于 `env.t`（程序启动后的秒数）。
+fn icon_elapsed(t:f64,at:f64)->f32{(t-at).max(0.0) as f32}
+
+fn notice_icon(c:&Card,x:f32,y:f32,a:&Alert,t:f64) {
     if let Some(id)=a.timer_id.as_deref(){
-        let now=chrono::Local::now().timestamp_millis() as f64/1000.0;
-        let elapsed=((now-a.at).max(0.0)) as f32;
+        // 必须用与 a.at 同一个时间源（程序启动后的秒数）。用 Unix 时间戳相减
+        // 得到 1.7e9 量级的 f32，精度只有 256 秒，每帧 1/60 秒会全部被量化掉。
+        let elapsed=icon_elapsed(t,a.at);
         match id {
             crate::timers::STAND_ID=>{
                 crate::paint::stand_person(c,x,y,22.0,elapsed,theme::SOFT_GREEN);
@@ -102,7 +106,8 @@ fn notice_icon(c:&Card,x:f32,y:f32,a:&Alert) {
             crate::timers::SMOKE_ID=>{
                 crate::paint::cigarette(c,x,y,25.0,elapsed,true);
             },
-            _=>crate::paint::stopwatch(&c.scaled(x,y,0.65),x,y,8.0,0.0,theme::BLUE),
+            // 站立小人和香烟都是 ~22pt，秒表沿用旧的 0.65 缩放会明显小一圈。
+            _=>crate::paint::stopwatch(c,x,y,8.5,0.0,theme::BLUE),
         }
         return;
     }
@@ -421,7 +426,7 @@ impl App {
         }
         if let Some((meeting,_))=&a.meeting {
             let secondary=Color32::from_gray(174);
-            notice_icon(&nc.scaled(34.0,46.0,36.0/28.0),34.0,46.0,a);
+            notice_icon(&nc.scaled(34.0,46.0,36.0/28.0),34.0,46.0,a,self.t);
             let now=chrono::Local::now();
             let start=chrono::DateTime::from_timestamp(meeting.start,0).unwrap().with_timezone(&chrono::Local);
             let left=meeting.start-now.timestamp();
@@ -479,7 +484,7 @@ impl App {
                     if self.volume_ui.is_some_and(|(_,muted)|muted){nc.seg((29.0,16.0),(34.0,22.0),1.4,theme::WHITE);nc.seg((34.0,16.0),(29.0,22.0),1.4,theme::WHITE);}
                     else{nc.arc(26.0,19.0,5.0,-0.8,0.8,1.5,theme::WHITE);nc.arc(26.0,19.0,8.0,-0.7,0.7,1.3,theme::WHITE);}
                 },
-                _=>notice_icon(&nc,24.0,19.0,a),
+                _=>notice_icon(&nc,24.0,19.0,a,self.t),
             }
             if a.title=="系统音量" {
                 self.draw_volume_hud(&nc);
@@ -494,20 +499,22 @@ impl App {
         } else {
             let is_water=a.page==2;let is_focus=a.page==1;let is_power=a.title=="电量偏低";
             let timer_id=a.timer_id.clone();
-            notice_icon(&nc,22.0,22.0,a);
-            // 定时提醒有三个按钮，文本区让出一点宽度，避免挤到图标上。
-            let max=if timer_id.is_some(){105.0}else if is_water{125.0}else{195.0};
+            notice_icon(&nc,22.0,22.0,a,self.t);
+            // 文本宽度按按钮组的实际左缘反推，保证与按钮之间始终留 8pt 空隙。
+            let timer_row=timer_button_row();
+            let max=if timer_id.is_some(){timer_row[0].0-43.0-8.0}else if is_water{125.0}else{195.0};
             nc.centered_text(43.0,14.0,&nc.fit(&a.title,11.0,W::Semibold,max),11.0,W::Semibold,theme::WHITE,H::Left);
             nc.centered_text(43.0,30.0,&nc.fit(&a.body,10.5,W::Regular,max),10.5,W::Regular,theme::GRAY,H::Left);
             if let Some(id)=timer_id {
                 let is_smoke=id==crate::timers::SMOKE_ID;
                 let primary=if is_smoke{"抽一支"}else{"知道了"};
-                if notice_button(&nc,156.0,12.0,54.0,primary,"timer-primary"){
+                let [(x1,w1),(x2,w2),(x3,w3)]=timer_row;
+                if notice_button(&nc,x1,12.0,w1,primary,"timer-primary"){
                     self.notice=None;
                     if is_smoke{self.smoke_from_alert();}else{self.ack_timer(&id);}
                 }
-                if notice_button(&nc,214.0,12.0,44.0,"稍后","timer-snooze"){self.notice=None;self.snooze_timer(&id);}
-                if notice_button(&nc,262.0,12.0,68.0,"定时设置","timer-settings"){self.notice=None;self.open_timer_settings_for(&id);}
+                if notice_button(&nc,x2,12.0,w2,"稍后","timer-snooze"){self.notice=None;self.snooze_timer(&id);}
+                if notice_button(&nc,x3,12.0,w3,"定时设置","timer-settings"){self.notice=None;self.open_timer_settings_for(&id);}
             }else if is_water {
                 if notice_button(&nc,181.0,12.0,62.0,"稍后","water-snooze"){self.last_reminder=self.t-self.settings.water_minutes as f64*60.0+600.0;self.notice=None;}
                 if notice_button(&nc,250.0,12.0,68.0,"喝一口","water-confirm"){self.notice=None;self.drink_water();}
@@ -694,6 +701,31 @@ mod tests {
     }
 
     /// 数值行必须和其它行一样贴着标签列左对齐，不能推到卡片右边。
+    #[test]
+    /// 回归：动画时间必须能用 f32 分辨相邻两帧，不能混进 Unix 时间戳。
+    #[test]
+    fn notice_icon_clock_resolves_single_frames() {
+        let first=icon_elapsed(10.0,9.0);
+        let next=icon_elapsed(10.0+1.0/60.0,9.0);
+        assert!((next-first-1.0/60.0).abs()<1e-5,"相邻帧的相位差应精确到 1/60 秒");
+        let wall_clock=1.76e9_f32;
+        assert_eq!(wall_clock+1.0/60.0,wall_clock,"Unix 时间戳量级的 f32 会吞掉整帧，这正是要避免的");
+    }
+
+    /// 三按钮卡片必须和原版两按钮卡片有同样的左右留白，不能顶到右边缘。
+    #[test]
+    fn timer_notice_buttons_keep_balanced_card_padding() {
+        let row=timer_button_row();
+        let right=row[2].0+row[2].1;
+        assert_eq!(right,250.0+68.0,"定时三按钮的右缘应与喝水卡片一致");
+        assert_eq!(334.0-right,16.0,"右侧留白必须与原版相同");
+        assert!(row[0].0>=43.0+100.0,"文本区不能被压到 100pt 以下");
+        for pair in row.windows(2) {
+            assert!(pair[1].0>=pair[0].0+pair[0].1,"按钮之间不能重叠");
+        }
+        assert!(row[0].0>43.0,"按钮组不能压到标题文字上");
+    }
+
     #[test]
     fn number_rows_left_align_with_other_controls() {
         let ctx=egui::Context::default();
@@ -887,6 +919,16 @@ fn notice_button(c:&Card,x:f32,y:f32,w:f32,text:&str,id:&str)->bool {
     let (r,b)=crate::paint::capsule(c,x,y,w,20.0,id,Color32::from_gray(35),theme::BTN_HOVER);
     b.centered_text(x+w/2.0,y+10.0,text,10.5,W::Semibold,theme::WHITE,H::Center);
     r.clicked()
+}
+/// 定时提醒三个按钮的 (x, 宽)。卡片宽 334，右侧留白固定 16 —— 和原版两按钮
+/// 卡片（喝水：250+68=318）共用同一条右基线，三按钮只会向左借空间，不会顶到边缘。
+fn timer_button_row()->[(f32,f32);3]{
+    const RIGHT:f32=318.0;
+    let (w1,w2,w3,gap)=(50.0,40.0,60.0,5.0);
+    let x3=RIGHT-w3;
+    let x2=x3-gap-w2;
+    let x1=x2-gap-w1;
+    [(x1,w1),(x2,w2),(x3,w3)]
 }
 fn setting_button(c:&Card,x:f32,y:f32,w:f32,text:&str,on:bool,id:&str)->bool {
     let (r,b)=crate::paint::capsule(c,x,y,w,19.0,id,if on{Color32::from_rgb(39,94,150)}else{theme::BTN},theme::BTN_HOVER);
