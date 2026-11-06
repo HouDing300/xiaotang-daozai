@@ -423,15 +423,19 @@ impl App {
                         let expected=self.quota.connect_target.as_ref().and_then(|id|self.quota.config.accounts.iter().find(|a|&a.id==id)).and_then(|a|a.slot.clone());self.quota.note.clear();self.quota.workbuddy_connecting=Some(quota::workbuddy::Connect::start(self.quota.alias.clone(),expected));
                     }
                 });
-                ui.label(egui::RichText::new("「连接当前浏览器」需要本机浏览器连接服务；没有扩展时请用下方 Cookie 方式。连接成功后可关闭浏览器。").size(12.0).color(ui.visuals().weak_text_color()));
-                ui.collapsing("使用 Cookie 连接（无需浏览器扩展）",|ui|{
-                    ui.label("在已登录的官网用量页按 F12 → 网络 → 刷新，任选一个官网请求，复制 Cookie 请求头。Cookie 只加密保存在本机。");
-                    ui.add_sized([ui.available_width(),27.0],egui::TextEdit::singleline(&mut self.quota.workbuddy_cookie).vertical_align(egui::Align::Center).password(true).hint_text("粘贴 Cookie 请求头"));
-                    if ui.add_enabled(self.quota.workbuddy_connecting.is_none()&&!self.quota.workbuddy_cookie.trim().is_empty(),egui::Button::new("验证并连接")).clicked(){
-                        let expected=self.quota.connect_target.as_ref().and_then(|id|self.quota.config.accounts.iter().find(|a|&a.id==id)).and_then(|a|a.slot.clone());
-                        self.quota.note.clear();
-                        self.quota.workbuddy_connecting=Some(quota::workbuddy::Connect::start_with_cookie(self.quota.alias.clone(),self.quota.workbuddy_cookie.clone(),expected));
-                    }
+                ui.label(egui::RichText::new("「连接当前浏览器」需要本机装有浏览器连接服务（第三方扩展）；没有装时用下面的 Cookie 方式，一样能连。").size(12.0).color(ui.visuals().weak_text_color()));
+                egui::CollapsingHeader::new("使用 Cookie 连接（无需浏览器扩展，推荐）").default_open(true).show(ui,|ui|{
+                    ui.add(egui::Label::new(egui::RichText::new("在已登录的官网用量页按 F12 → 网络（Network）→ 刷新 → 点任一官网请求 → 复制请求头里的 Cookie。嫌麻烦的话，只复制 session 这一条的值也可以。").size(12.0)).wrap());
+                    ui.add_sized([ui.available_width(),27.0],egui::TextEdit::singleline(&mut self.quota.workbuddy_cookie).vertical_align(egui::Align::Center).password(true).hint_text("粘贴 Cookie 请求头，或只粘贴 session 的值"));
+                    ui.horizontal(|ui|{
+                        if ui.add_enabled(self.quota.workbuddy_connecting.is_none()&&!self.quota.workbuddy_cookie.trim().is_empty(),egui::Button::new("验证并连接")).clicked(){
+                            let expected=self.quota.connect_target.as_ref().and_then(|id|self.quota.config.accounts.iter().find(|a|&a.id==id)).and_then(|a|a.slot.clone());
+                            self.quota.note.clear();
+                            self.quota.workbuddy_connecting=Some(quota::workbuddy::Connect::start_with_cookie(self.quota.alias.clone(),self.quota.workbuddy_cookie.clone(),expected));
+                        }
+                        if ui.button("打开官网用量页").clicked(){self.pending.push(Cmd::OpenUrl("https://www.codebuddy.cn/profile/usage".into()));}
+                    });
+                    ui.add(egui::Label::new(egui::RichText::new("只保留 session 等 4 个登录 Cookie，其余站点凭据会被丢弃；会话用 Windows DPAPI 加密后存在本机，只会发回 WorkBuddy 官网，不会上传到别处。登录态通常 30 天有效，过期后这里会提示重新粘贴。").size(11.0).color(ui.visuals().weak_text_color())).wrap());
                 });
                 if self.quota.workbuddy_connecting.is_some(){ui.spinner();ui.label("正在验证积分…");ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));}
             }else if self.quota.provider==Provider::DeepSeek{

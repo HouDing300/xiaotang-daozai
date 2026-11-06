@@ -1,4 +1,4 @@
-//! WorkBuddy 官方客户端积分汇总，浏览器授权连接。
+﻿//! WorkBuddy 官方客户端积分汇总，浏览器授权连接。
 use super::{Account,Snapshot};
 use serde_json::{json,Value};
 use std::{io::Read,sync::mpsc,time::Duration};
@@ -96,6 +96,10 @@ pub fn fetch(agent:&ureq::Agent,account:&Account)->Result<Snapshot,(String,u64)>
             let session:Session=serde_json::from_slice(&raw).map_err(|_|("保存的 WorkBuddy 会话无效，请重新连接".into(),0))?;
             match query(agent,&session,id){
                 Ok(snapshot)=>return Ok(snapshot),
+                // 官网明确说登录过期：没有桥接服务就别再去试浏览器，直接给可操作的提示。
+                Err(Failure::Expired) if !bridge_available()=>{
+                    return Err(("WorkBuddy 登录已过期（Cookie 通常 30 天有效），请在账号菜单点「重新连接」并粘贴新的 Cookie".into(),0));
+                },
                 Err(Failure::Expired)=>{},
                 Err(e)=>return Err((e.message(),30))
             }
@@ -160,10 +164,22 @@ fn cookie_header(raw:&str)->Result<String,String>{
     let raw=raw.trim();
     let raw=raw.strip_prefix("Cookie:").or_else(||raw.strip_prefix("cookie:")).unwrap_or(raw).trim();
     if raw.is_empty(){return Err("请先粘贴 Cookie 请求头".into());}
-    if raw.contains(['\r','\n']){return Err("Cookie 格式无效，请复制单行请求头".into());}
+    // 浏览器里复制出来的 Cookie 偶尔带换行，先折叠成一行再解析。
+    let collapsed=raw.replace(['\r','\n'],"; ");
+    let raw=collapsed.trim().trim_end_matches(';').trim();
+    if raw.is_empty(){return Err("Cookie 内容无效".into());}
+    // 只粘贴 session 的值也接受：没有 name=value 结构时按 session 值处理。
+    if !raw.contains('='){
+        if raw.contains([';','"','\r','\n'])||raw.split_whitespace().count()>1{
+            return Err("Cookie 格式无效，请复制完整的请求头，或粘贴带 session= 前缀的值".into());
+        }
+        return Ok(format!("session={raw}"));
+    }
     let mut kept=Vec::new();
     for part in raw.split(';'){
-        let (name,value)=part.trim().split_once('=').ok_or_else(||"Cookie 格式无效，请复制完整的请求头".to_string())?;
+        let part=part.trim();
+        if part.is_empty(){continue;}
+        let Some((name,value))=part.split_once('=') else{return Err("Cookie 格式无效，请复制完整的请求头".into());};
         let (name,value)=(name.trim(),value.trim());
         if !COOKIE_NAMES.contains(&name){continue;}
         if value.is_empty()||value.contains([';','"','\r','\n']){return Err("Cookie 内容无效".into());}

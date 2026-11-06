@@ -1,17 +1,20 @@
 ﻿//! 持久化与状态模型。
 //!
-//! 文件布局与原工具同名同结构（原工具字符串中可见的路径与键名），但默认目录
-//! 用独立的 `%APPDATA%\Daozai`，避免与原工具的 `%APPDATA%\Nusa` 互相覆盖：
-//!   %APPDATA%\Daozai\settings.txt   -> pet=0/1, minimal=0/1
-//!   %APPDATA%\Daozai\todo.txt
-//!   %APPDATA%\Daozai\water.txt      -> bottle=<ml> / goal=<ml> / start=YYYY-MM-DD
-//!   %APPDATA%\Daozai\shelf.txt      -> 置物清单（每行一个绝对路径）
-//!   %APPDATA%\Daozai\timers.json    -> 自定义定时提醒
+//! 文件布局与原工具同名同结构（原工具字符串中可见的路径与键名）。默认数据目录
+//! 是**程序所在目录下的 `data`**（便携），只有在安装目录不可写（例如装在
+//! `Program Files` 且没有管理员权限）时才退回 `%APPDATA%\Daozai`：
+//!   <程序目录>\data\settings.txt   -> pet=0/1, minimal=0/1
+//!   <程序目录>\data\todo.txt
+//!   <程序目录>\data\water.txt      -> bottle=<ml> / goal=<ml> / start=YYYY-MM-DD
+//!   <程序目录>\data\shelf.txt      -> 置物清单（每行一个绝对路径）
+//!   <程序目录>\data\timers.json    -> 自定义定时提醒
 //!
 //! 数据目录优先级：环境变量 `DAOZAI_DATA_DIR`（开发/测试）> 引导文件
 //! `%APPDATA%\Daozai\data-dir.txt`（设置里可视化更改）> 默认目录。
-//! 引导文件固定放在默认目录，不会随数据一起被搬走；`main()` 启动时读一次并
-//! 注入环境变量，因此 `config_dir()` 每次调用仍然只是读环境变量，无额外 IO。
+//! 引导文件固定留在 `%APPDATA%\Daozai`，不会随数据一起被搬走；`main()` 启动时
+//! 读一次并注入环境变量，因此 `config_dir()` 每次调用仍然只是读环境变量。
+//! 从旧版本升级（数据还在 `%APPDATA%\Daozai`）时，首次启动会把旧数据复制到
+//! 便携目录，旧目录原样保留。
 //!
 //! 所有用户数据都通过 `config_dir()` 取路径，切换目录时需迁移的文件见
 //! `DATA_ENTRIES`。
@@ -23,14 +26,51 @@ fn env_dir(key: &str) -> PathBuf {
     std::env::var_os(key).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// 默认（也是引导文件所在）目录，不随用户设置变化。
-pub fn default_config_dir() -> PathBuf {
+/// 旧版默认目录：只作为不可写时的回退，以及引导文件的固定住所。
+pub fn legacy_config_dir() -> PathBuf {
     env_dir("APPDATA").join("Daozai")
 }
 
-/// 引导文件：内容只有一行，即用户选择的数据目录。
+/// 便携数据目录：程序所在目录下的 `data`。
+pub fn portable_config_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    Some(exe.parent()?.join("data"))
+}
+
+/// 目录是否可用：能创建、能写入探针文件。
+pub(crate) fn dir_writable(dir: &Path) -> bool {
+    if fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let probe = dir.join(format!(".daozai-probe-{}.tmp", std::process::id()));
+    let ok = fs::write(&probe, b"ok").is_ok();
+    let _ = fs::remove_file(&probe);
+    ok
+}
+
+/// 目录里是否已有岛仔的数据，用来判断要不要从旧目录搬过来。
+pub(crate) fn has_user_data(dir: &Path) -> bool {
+    DATA_ENTRIES.iter().any(|name| dir.join(name).exists())
+}
+
+/// 默认数据目录：程序目录下的 `data` 可写就用它，否则退回 `%APPDATA%\Daozai`。
+/// 解析结果只算一次（`config_dir()` 每帧都会被调用，不能反复探测磁盘）。
+pub fn default_config_dir() -> PathBuf {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        if let Some(dir) = portable_config_dir() {
+            if dir_writable(&dir) {
+                return dir;
+            }
+        }
+        legacy_config_dir()
+    })
+    .clone()
+}
+
+/// 引导文件：内容只有一行，即用户选择的数据目录。固定放在旧默认目录。
 pub fn data_dir_pointer_path() -> PathBuf {
-    default_config_dir().join("data-dir.txt")
+    legacy_config_dir().join("data-dir.txt")
 }
 
 fn parse_data_dir_pointer(text: &str) -> Option<PathBuf> {
@@ -56,7 +96,16 @@ pub fn apply_data_dir_bootstrap() {
         if fs::create_dir_all(&path).is_ok() {
             std::env::set_var("DAOZAI_DATA_DIR", &path);
         }
+        return;
     }
+    // 没有引导文件：默认用程序目录下的 data。
+    let target = default_config_dir();
+    // 从旧版本升级：数据还在 %APPDATA%\Daozai 而便携目录是空的，先复制过来。
+    let legacy = legacy_config_dir();
+    if target != legacy && !has_user_data(&target) && has_user_data(&legacy) {
+        let _ = migrate_data_dir(&legacy, &target);
+    }
+    std::env::set_var("DAOZAI_DATA_DIR", &target);
 }
 
 pub fn config_dir() -> PathBuf {
@@ -349,8 +398,8 @@ pub struct Settings {
     pub browser_minimal: bool,
     pub avoid_browsers: bool,
     pub avoid_apps: Vec<(String,String)>,
-    pub visible_pages: [bool; 8],
-    pub page_order: [usize; 8],
+    pub visible_pages: [bool; 9],
+    pub page_order: [usize; 9],
     pub show_battery: bool,
     pub clock_12h: bool,
     pub clock_period: u8,
@@ -392,7 +441,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 8], page_order: [0,1,2,3,4,5,6,7], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wechat_tray_open:false, qq_only:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true }
+        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 9], page_order: [0,1,2,3,4,5,6,7,8], show_battery: true, clock_12h: false, clock_period: 0, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wechat_tray_open:false, qq_only:false, notification_preview:false, notifications: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, mail_enabled: true, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true }
     }
 }
 
@@ -446,8 +495,10 @@ impl Settings {
                     if crate::bar_layout::valid_order(&order){s.resident_order=order;}
                 }
                 "page_order" => {
-                    if let Ok(order)=v.split(',').map(str::parse::<usize>).collect::<Result<Vec<_>,_>>() {
-                        if order.len()==8 && (0..8).all(|page|order.contains(&page)) {
+                    if let Ok(mut order)=v.split(',').map(str::parse::<usize>).collect::<Result<Vec<_>,_>>() {
+                        // 兼容旧版 8 项顺序：新增的「定时」页排在最后。
+                        if order.len()==8 && (0..8).all(|page|order.contains(&page)) { order.push(8); }
+                        if order.len()==9 && (0..9).all(|page|order.contains(&page)) {
                             s.page_order.copy_from_slice(&order);
                         }
                     }
@@ -455,7 +506,7 @@ impl Settings {
                 "clock_period" => s.clock_period = v.parse::<u8>().ok().filter(|v|*v<=2).unwrap_or(0),
                 "clock_12h" => s.clock_12h = v == "1",
                 "show_battery" => s.show_battery = v != "0",
-                "visible_pages" if (6..=8).contains(&v.len()) && v.bytes().all(|b| b==b'0' || b==b'1') => {
+                "visible_pages" if (6..=9).contains(&v.len()) && v.bytes().all(|b| b==b'0' || b==b'1') => {
                     for (enabled,value) in s.visible_pages.iter_mut().zip(v.bytes()) { *enabled=value==b'1'; }
                     for enabled in &mut s.visible_pages[v.len()..]{*enabled=v.bytes().any(|b|b==b'1');}
                 }

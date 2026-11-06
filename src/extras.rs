@@ -1191,7 +1191,7 @@ impl App {
                         });
                         settings_label(ui,"功能页面");
                         settings_card(ui,|ui|{
-                            let descriptions=["播放控制与同步歌词","番茄钟与休息计时","饮水记录与提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程"];
+                            let descriptions=["播放控制与同步歌词","番茄钟与休息计时","饮水记录与提醒","临时收纳文件位置","任务清单与到期提醒","邮件摘要与验证码","Agent 剩余额度和账号切换","月历、邮件邀请与工作日程","站立提醒与自定义定时"];
                             ui.label(egui::RichText::new("拖动左侧手柄调整顺序，松开后自动应用到岛。").size(11.5).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
                             #[derive(Clone)]
                             struct PageDrag(usize);
@@ -1332,6 +1332,42 @@ impl App {
                             setting_row(ui,"提醒声音","喝水、待办和专注提醒",&mut self.settings.sound);
                             ui.separator();
                             setting_row(ui,"全屏时隐藏","游戏、视频和演示全屏时隐藏",&mut self.settings.hide_fullscreen);
+                        });
+                        settings_label(ui,"数据文件位置");
+                        settings_card(ui,|ui|{
+                            ui.label(egui::RichText::new(format!("当前：{}",crate::model::config_dir().display())).size(11.5).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
+                            ui.label(egui::RichText::new("默认保存在程序目录下的 data 文件夹，整个文件夹连同程序一起拷走即可迁移。安装目录不可写时自动改用 %APPDATA%\\Daozai。").size(11.0).color(settings_color(ctx,Color32::from_gray(160),Color32::from_gray(100))));
+                            ui.add_space(4.0);
+                            settings_control_row(ui,"新目录",80.0,|ui|{
+                                ui.add_sized([ui.available_width().min(360.0),28.0],egui::TextEdit::singleline(&mut self.data_dir_input).hint_text("例如 D:\\DaozaiData"))
+                            });
+                            ui.horizontal(|ui|{
+                                if ui.button("浏览…").clicked(){
+                                    match pick_data_dir(){
+                                        Ok(Some(path))=>{self.data_dir_input=path;self.data_dir_status.clear();},
+                                        Ok(None)=>{},
+                                        Err(e)=>self.data_dir_status=e,
+                                    }
+                                }
+                                if ui.button("更改并迁移").clicked(){
+                                    let raw=self.data_dir_input.trim().to_string();
+                                    match crate::model::set_data_dir(std::path::Path::new(&raw)){
+                                        Ok(count)=>self.data_dir_status=format!("已复制 {count} 个文件到新目录，原目录保留作备份。重启岛仔后完全生效。"),
+                                        Err(e)=>self.data_dir_status=e,
+                                    }
+                                }
+                                if ui.button("恢复默认").clicked(){
+                                    match crate::model::reset_data_dir(){
+                                        Ok(_)=>self.data_dir_status="已恢复默认（程序目录下的 data），重启岛仔后生效。".into(),
+                                        Err(e)=>self.data_dir_status=e,
+                                    }
+                                }
+                                if ui.button("打开目录").clicked(){self.pending.push(Cmd::Open(crate::model::config_dir()));}
+                            });
+                            if !self.data_dir_status.is_empty(){
+                                ui.add(egui::Label::new(egui::RichText::new(self.data_dir_status.as_str()).size(11.0).color(settings_color(ctx,Color32::from_rgb(240,190,110),Color32::from_rgb(150,90,20)))).wrap());
+                            }
+                            settings_hint(ui,"引导文件固定放在 %APPDATA%\\Daozai；邮箱与日历密码存于 Windows 凭据管理器，不随目录迁移。若设置了 DAOZAI_DATA_DIR 环境变量，它会覆盖这里的设置。");
                         });
                     }
                     1=>{
@@ -1734,41 +1770,6 @@ impl App {
                                 if ui.button("打开本地数据目录").clicked(){self.pending.push(Cmd::Open(crate::model::config_dir()));}
                                 ui.label(egui::RichText::new("设备图标：Solar Icons · 480 Design").size(11.0).color(settings_color(ctx,Color32::from_gray(150),Color32::from_gray(105))));
                                 ui.hyperlink_to("CC BY 4.0", "https://creativecommons.org/licenses/by/4.0/");
-                            });
-                        });
-                        // 高级项默认收起：关于页保持简洁，也避免长说明影响字体图集的光栅化一致性。
-                        ui.collapsing("数据文件位置（高级）",|ui|{
-                            settings_card(ui,|ui|{
-                                ui.label(egui::RichText::new(format!("当前：{}",crate::model::config_dir().display())).size(11.5).color(settings_color(ctx,Color32::from_gray(180),Color32::from_gray(75))));
-                                settings_control_row(ui,"新目录",80.0,|ui|{
-                                    ui.add_sized([ui.available_width().min(360.0),28.0],egui::TextEdit::singleline(&mut self.data_dir_input).hint_text("例如 D:\\DaozaiData"))
-                                });
-                                ui.horizontal(|ui|{
-                                    if ui.button("浏览…").clicked(){
-                                        match pick_data_dir(){
-                                            Ok(Some(path))=>{self.data_dir_input=path;self.data_dir_status.clear();},
-                                            Ok(None)=>{},
-                                            Err(e)=>self.data_dir_status=e,
-                                        }
-                                    }
-                                    if ui.button("更改并迁移").clicked(){
-                                        let raw=self.data_dir_input.trim().to_string();
-                                        match crate::model::set_data_dir(std::path::Path::new(&raw)){
-                                            Ok(count)=>self.data_dir_status=format!("已复制 {count} 个文件到新目录，原目录保留作备份。重启岛仔后完全生效。"),
-                                            Err(e)=>self.data_dir_status=e,
-                                        }
-                                    }
-                                    if ui.button("恢复默认").clicked(){
-                                        match crate::model::reset_data_dir(){
-                                            Ok(_)=>self.data_dir_status="已恢复默认目录，重启岛仔后生效。".into(),
-                                            Err(e)=>self.data_dir_status=e,
-                                        }
-                                    }
-                                });
-                                if !self.data_dir_status.is_empty(){
-                                    ui.add(egui::Label::new(egui::RichText::new(self.data_dir_status.as_str()).size(11.0).color(settings_color(ctx,Color32::from_rgb(240,190,110),Color32::from_rgb(150,90,20)))).wrap());
-                                }
-                                settings_hint(ui,"引导文件固定放在 %APPDATA%\\Daozai；邮箱与日历密码存于 Windows 凭据管理器，不随目录迁移。若设置了 DAOZAI_DATA_DIR 环境变量，它会覆盖这里的设置。");
                             });
                         });
                         settings_label(ui,"支持作者");

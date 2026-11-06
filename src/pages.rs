@@ -418,6 +418,87 @@ impl App {
         }
     }
 
+    // ================= 定时 =================
+    /// 岛上的「定时」页：左边是最近一条提醒的倒计时，右边是提醒列表（可直接开关）。
+    pub(crate) fn page_timers(&mut self, c: &Card, env: &Env) {
+        let now = chrono::Local::now().timestamp();
+        let hour = env.hour() as u32;
+        let minute = env.minute();
+        let upcoming = self.timers.upcoming(now, hour, minute, &env.today);
+        let enabled = self.timers.enabled_count();
+        let total = self.timers.items.len();
+
+        // 左：秒表图标 + 下一条提醒的倒计时
+        let running = upcoming.is_some();
+        let hand = if running && crate::bar_layout::animations_enabled() { (self.t as f32 * 1.1) % TAU } else { 0.0 };
+        c.glow(58.0, 66.0, 36.0, paint::alpha(theme::YELLOW, if running { 0.16 } else { 0.05 }));
+        paint::stopwatch(&c.scaled(58.0, 50.0, 1.2), 58.0, 50.0, 10.5, hand, if running { theme::YELLOW } else { Color32::from_gray(110) });
+
+        let (big, unit) = match &upcoming {
+            Some(u) if u.secs < 3600 => (((u.secs + 59) / 60).to_string(), "分钟后"),
+            Some(u) => (format!("{}:{:02}", u.secs / 3600, u.secs % 3600 / 60), "小时后"),
+            None => ("—".to_string(), if total == 0 { "还没有提醒" } else { "已全部关闭" }),
+        };
+        let bw = c.text(80.0, 68.0, &big, 25.0, W::Bold, if running { theme::YELLOW } else { theme::GRAY }, H::Left);
+        c.text(80.0 + bw + 3.0, 66.0, unit, 11.0, W::Semibold, theme::GRAY, H::Left);
+        let sub = upcoming.as_ref().map(|u| u.title.as_str()).unwrap_or("点「管理提醒」新建一条");
+        c.text(80.0, 84.0, &c.fit(sub, size::SMALL, W::Regular, 104.0), size::SMALL, W::Regular, theme::WHITE, H::Left);
+        c.text(80.0, 95.0, &format!("{enabled}/{total} 条已开启"), size::TINY, W::Regular, theme::GRAY, H::Left);
+
+        let (manage, mc) = capsule(c, 43.0, 102.0, 96.0, 25.0, "timer-manage", theme::BTN, theme::BTN_HOVER);
+        paint::sliders(&mc, 58.0, 114.5, theme::WHITE);
+        mc.text(70.0, 117.5, "管理提醒", size::BODY, W::Regular, theme::WHITE, H::Left);
+        if manage.clicked() { self.open_timers_settings(); }
+
+        // 右：提醒列表（最多 3 条，可直接开关）
+        c.fill(196.0, 31.0, 181.0, 93.0, 12.0, theme::CARD);
+        if total == 0 {
+            paint::stopwatch(c, 286.0, 62.0, 16.0, 0.0, Color32::from_gray(120));
+            c.text(286.0, 92.0, "还没有定时提醒", size::SMALL, W::Regular, theme::GRAY, H::Center);
+            c.text(286.0, 106.0, "在「管理提醒」里加一条", size::TINY, W::Regular, theme::DIM, H::Center);
+        } else {
+            let rows: Vec<(String, String, bool, String)> = self
+                .timers
+                .items
+                .iter()
+                .map(|i| (i.id.clone(), i.title.clone(), i.enabled, i.next_label(now, hour, minute, &env.today)))
+                .collect();
+            let shown = rows.len().min(3);
+            let mut toggle: Option<String> = None;
+            let mut open = false;
+            for (index, (id, title, on, when)) in rows.iter().take(shown).enumerate() {
+                let y = 48.0 + index as f32 * 22.0;
+                let row = c.hit(200.0, y - 10.0, 174.0, 20.0, ("timer-row", id.as_str()));
+                let (hover, _) = c.hover_t(&row);
+                if hover > 0.01 {
+                    c.fill(201.0, y - 10.0, 172.0, 20.0, 7.0, Color32::from_white_alpha((12.0 * hover) as u8));
+                }
+                let dot = if *on { theme::GREEN } else { Color32::from_rgb(70, 70, 76) };
+                c.circle(212.0, y, 4.6, dot);
+                if *on { c.ring(212.0, y, 6.6, 1.0, paint::alpha(theme::GREEN, 0.28)); }
+                let ink = if *on { theme::WHITE } else { Color32::from_gray(130) };
+                c.text(224.0, y + 4.0, &c.fit(title, size::SMALL, W::Semibold, 88.0), size::SMALL, W::Semibold, ink, H::Left);
+                c.text(371.0, y + 4.0, when, size::TINY, W::Regular, if *on { theme::GRAY } else { theme::DIM }, H::Right);
+                if row.clicked() { toggle = Some(id.clone()); }
+                if row.secondary_clicked() { open = true; }
+            }
+            if rows.len() > shown {
+                c.text(371.0, 116.0, &format!("+{} 条", rows.len() - shown), size::TINY, W::Regular, theme::DIM, H::Right);
+            }
+            if let Some(id) = toggle {
+                if let Some(item) = self.timers.items.iter_mut().find(|i| i.id == id) {
+                    item.enabled = !item.enabled;
+                    // 重新开启时重置计时基准，避免刚打开就立刻提醒。
+                    item.last_fired = 0;
+                    item.fired_on.clear();
+                    item.snooze_until = 0;
+                }
+                self.timers.save();
+            }
+            if open { self.open_timers_settings(); }
+        }
+    }
+
     // ================= 置物架 =================
     /// 标题旁的「文件 | 剪贴板」分栏，返回分栏右边缘。
     /// 页面标题处的「置物架 | 剪贴板」分栏，返回分栏右边缘。

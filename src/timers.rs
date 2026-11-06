@@ -69,6 +69,64 @@ impl TimerItem {
             TimerMode::Daily { hour, minute } => format!("每天 {hour:02}:{minute:02} · {window}"),
         }
     }
+
+    /// 岛上页面用：距离下一次触发还有多久（秒）。`None` 表示当前不会触发。
+    pub fn remaining(&self, now: i64, hour: u32, minute: u32, today: &str) -> Option<i64> {
+        if !self.enabled {
+            return None;
+        }
+        if self.snooze_until > now {
+            return Some(self.snooze_until - now);
+        }
+        match self.mode {
+            TimerMode::Interval { minutes } => {
+                let period = minutes.max(1) as i64 * 60;
+                if self.last_fired <= 0 {
+                    // 还没开始计时：下一次就是「现在 + 一个间隔」。
+                    Some(period)
+                } else {
+                    Some((period - (now - self.last_fired)).max(0))
+                }
+            }
+            TimerMode::Daily { hour: h, minute: m } => {
+                let now_secs = hour as i64 * 3600 + minute as i64 * 60;
+                let target = h.min(23) as i64 * 3600 + m.min(59) as i64 * 60;
+                if self.fired_on == today {
+                    Some(86_400 - now_secs + target)
+                } else if target > now_secs {
+                    Some(target - now_secs)
+                } else {
+                    Some(0)
+                }
+            }
+        }
+    }
+
+    /// 岛上页面用：简短的下次触发说明。
+    pub fn next_label(&self, now: i64, hour: u32, minute: u32, today: &str) -> String {
+        if !self.enabled {
+            return "已关闭".into();
+        }
+        match self.mode {
+            TimerMode::Daily { hour: h, minute: m } if self.fired_on == today => {
+                format!("明天 {h:02}:{m:02}")
+            }
+            TimerMode::Daily { hour: h, minute: m } => format!("今天 {h:02}:{m:02}"),
+            TimerMode::Interval { minutes } => match self.remaining(now, hour, minute, today) {
+                Some(0) => "即将提醒".into(),
+                Some(secs) => format!("{} 分钟后", (secs + 59) / 60),
+                None => format!("每 {minutes} 分钟"),
+            },
+        }
+    }
+}
+
+/// 岛上「定时」页要展示的下一条提醒。
+#[derive(Clone, Debug)]
+pub struct Upcoming {
+    pub title: String,
+    pub when: String,
+    pub secs: i64,
 }
 
 /// `take_due` 返回的一条待弹提醒。
@@ -198,6 +256,21 @@ impl TimerList {
 
     pub fn find(&self, id: &str) -> Option<&TimerItem> {
         self.items.iter().find(|i| i.id == id)
+    }
+
+    /// 最近的一条待触发提醒，用于岛上「定时」页的主展示。
+    pub fn upcoming(&self, now: i64, hour: u32, minute: u32, today: &str) -> Option<Upcoming> {
+        self.items
+            .iter()
+            .filter_map(|item| {
+                let secs = item.remaining(now, hour, minute, today)?;
+                Some(Upcoming { title: item.title.clone(), when: item.next_label(now, hour, minute, today), secs })
+            })
+            .min_by_key(|u| u.secs)
+    }
+
+    pub fn enabled_count(&self) -> usize {
+        self.items.iter().filter(|i| i.enabled).count()
     }
 
     /// 内置「站立提醒」，尚未开启时返回 None。

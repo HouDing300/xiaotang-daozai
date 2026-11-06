@@ -1,4 +1,4 @@
-//! 灵动岛主体：状态、悬停形变、切页、顶栏与公共层。与平台无关——
+﻿//! 灵动岛主体：状态、悬停形变、切页、顶栏与公共层。与平台无关——
 //! Windows 外壳（`main.rs`）和无窗口录制器（`daozai-record`）共用同一份代码。
 //!
 //! 时间一律来自 `Env::t`（秒），不直接读系统时钟，所以录屏可逐帧复现。
@@ -49,7 +49,7 @@ fn pill_shadow(painter:&egui::Painter,rect:Rect,radius:f32,strength:f32){
         painter.rect_filled(r,radius+grow*0.8,Color32::from_black_alpha((255.0*a*strength) as u8));
     }
 }
-pub(crate) const PAGE_NAMES: [&str; 8] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程"];
+pub(crate) const PAGE_NAMES: [&str; 9] = ["音乐", "专注", "饮水", "置物架", "待办", "邮箱", "AI 额度", "日程", "定时"];
 
 // ---------- 动效参数 ----------
 /// 悬停意图缓冲：光标停留这么久才真正展开（期间药丸轻微胀大作为反馈），防误触。
@@ -584,7 +584,7 @@ pub struct App {
     page_dir: f32,
     page_t0: f64,
     slide: Spring,
-    dots: [Spring; 8],
+    dots: [Spring; 9],
     wheel_delta: f32,
     wheel_at: f64,
     wheel_page_at: f64,
@@ -1237,7 +1237,7 @@ impl App {
 
     pub fn show_page(&mut self,page:usize) {
         if !self.settings.visible_pages[page] {
-            self.settings_tab=[1,2,3,5,4,7,11,8][page];
+            self.settings_tab=[1,2,3,5,4,7,11,8,crate::timers::CUSTOM_TAB][page];
             self.open_settings();
             return;
         }
@@ -2325,7 +2325,7 @@ impl App {
         let (hover,press)=c.hover_t(&settings);
         c.circle(394.0,18.0,13.0,Color32::from_white_alpha((hover*24.0) as u8));
         paint::gear(&c.scaled(394.0,18.0,0.8*(1.0-press*0.08)),394.0,18.0,paint::mix(theme::GRAY,theme::WHITE,hover));
-        if settings.clicked(){self.settings_tab=[1,2,3,5,4,7,11,8][self.page];self.open_settings();}
+        if settings.clicked(){self.settings_tab=[1,2,3,5,4,7,11,8,crate::timers::CUSTOM_TAB][self.page];self.open_settings();}
         if self.subpage==Some(self.page) {
             c.text(15.0,25.0,"‹",19.0,W::Bold,theme::WHITE,H::Left);
             c.text(37.0,25.0,if self.page==2{"饮水设置"}else{"专注设置"},size::TITLE,W::Bold,theme::WHITE,H::Left);
@@ -2367,6 +2367,7 @@ impl App {
             4 => ("待办", "清单", theme::GREEN),
             5 => ("邮箱", "", theme::CYAN),
             6 => ("AI", "额度", theme::SOFT_GREEN),
+            8 => ("定时", "提醒", theme::YELLOW),
             _ => ("岛仔", "设置", theme::WHITE),
         };
         let wa = c.text(15.0, base, a, size::TITLE, W::Bold, theme::WHITE, H::Left);
@@ -2423,6 +2424,7 @@ impl App {
             4 => self.page_todo(c, env, cmds),
             5 => self.page_mail(c, env, cmds),
             6 => self.page_quota(c),
+            8 => self.page_timers(c,env),
             CALENDAR_PAGE => self.page_calendar(c,env),
             _ => self.page_settings(c),
         }
