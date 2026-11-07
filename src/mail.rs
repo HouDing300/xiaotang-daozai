@@ -877,9 +877,23 @@ mod service {
         false
     }
 
-    fn wait_for_change<T: std::io::Read + std::io::Write + imap::extensions::idle::SetReadTimeout>(session: &mut imap::Session<T>) -> imap::Result<()> {
-        // 优先响应服务器推送；定期补查，避免服务端漏推送时长时间没有提醒。
-        session.idle()?.wait_with_timeout(Duration::from_secs(10)).map(|_| ())
+    /// IDLE 悬挂多久主动收线一次。
+    ///
+    /// 太短会频繁发 DONE：163 会把它当成一次重新登录，几秒一次很快触发限流，
+    /// 表现就是「邮件迟迟不来」。5 分钟是 RFC 2177 建议的 29 分钟以内的保守值。
+    const IDLE_HOLD: Duration = Duration::from_secs(300);
+
+    /// 连续登录失败后的退避秒数：30、60、120、240、480、600 封顶。
+    /// 163 对频繁登录会临时封禁，10 秒级重试只会让封禁越来越久。
+    fn backoff_secs(failures: u32) -> u64 {
+        let exponent = failures.saturating_sub(1).min(5);
+        (30u64.saturating_mul(1u64 << exponent)).min(600)
+    }
+
+    /// 优先响应服务器推送；到点则主动收线，避免服务端漏推送。
+    /// 返回唤醒原因，用于区分「推送」与「超时兜底」。
+    fn wait_for_change<T: std::io::Read + std::io::Write + imap::extensions::idle::SetReadTimeout>(session: &mut imap::Session<T>, hold: Duration) -> imap::Result<imap::extensions::idle::WaitOutcome> {
+        session.idle()?.wait_with_timeout(hold)
     }
 
     #[test]
@@ -908,16 +922,38 @@ mod service {
         client.read_greeting().unwrap();
         let mut session=client.login("test","test").unwrap();
         let start=std::time::Instant::now();
-        let result=wait_for_change(&mut session);
+        let result=wait_for_change(&mut session, Duration::from_secs(10));
         assert!(server.join().unwrap(),"服务端未推送时，必须在 14 秒内主动结束等待并补查");
         result.unwrap();
         if push {assert!(start.elapsed()<Duration::from_secs(2),"有推送时必须立即处理，不能等待检查间隔");}
         }
     }
 
+    #[test]
+    fn login_backoff_grows_and_caps() {
+        let secs: Vec<u64> = (1..=7).map(backoff_secs).collect();
+        assert_eq!(secs, [30, 60, 120, 240, 480, 600, 600], "连续失败应指数退避并封顶 600 秒");
+    }
+
+    /// 收信链路的诊断日志：连接、IDLE 唤醒、抓取数量。
+    /// 用户反馈「邮件迟迟不来」时，这份日志是唯一能还原现场的记录。
+    fn log(message: &str) {
+        if cfg!(test) {
+            return;
+        }
+        let stamp = chrono::Local::now().format("%m-%d %H:%M:%S");
+        crate::resources::append_log(
+            &crate::model::config_dir().join("diagnostics"),
+            "mail.log",
+            &format!("{stamp} {message}"),
+        );
+    }
+
     fn worker(account: Account, stop: Arc<AtomicBool>, interval: Arc<AtomicU64>, ev: Sender<Event>) {
         let mut first = true;
         let mut last_uid = 0u32;
+        // 连续登录失败计数，用于指数退避。
+        let mut failures = 0u32;
         loop {
             if stop.load(Ordering::Relaxed) {
                 return;
@@ -940,24 +976,31 @@ mod service {
                 }
             };
             let mut session = match net::connect(&account, &password) {
-                Ok(s) => s,
+                Ok(s) => {
+                    failures = 0;
+                    s
+                }
                 Err(e) => {
+                    log(&format!("{} connect failed: {e}", account.email));
                     let _ = ev.send(Event::Status {
                         account: account.email.clone(),
                         status: Status::Failed(e),
                     });
-                    if sleep_stop(&stop, 30) {
+                    failures = failures.saturating_add(1);
+                    if sleep_stop(&stop, backoff_secs(failures)) {
                         return;
                     }
                     continue;
                 }
             };
             if stop.load(Ordering::Relaxed){let _=session.logout();return;}
+            log(&format!("{} connected", account.email));
             let _ = ev.send(Event::Status {
                 account: account.email.clone(),
                 status: Status::Ready,
             });
             if session.select("INBOX").is_err() {
+                log(&format!("{} cannot open INBOX", account.email));
                 let _ = ev.send(Event::Status {
                     account: account.email.clone(),
                     status: Status::Failed("无法打开收件箱".into()),
@@ -969,7 +1012,18 @@ mod service {
             }
             if first {
                 last_uid = recent(&mut session, &account, &ev).unwrap_or(0);
+                log(&format!("{} first sync, last uid {last_uid}", account.email));
                 first = false;
+            } else {
+                // 断线间隙到的邮件不能指望 IDLE 补推：重连后先补拉一次。
+                if fetch_new(&mut session, &account, &mut last_uid, &ev).is_err() {
+                    log(&format!("{} fetch after reconnect failed", account.email));
+                    let _ = session.logout();
+                    if sleep_stop(&stop, 10) {
+                        return;
+                    }
+                    continue;
+                }
             }
 
             let idle_supported=match session.capabilities() {
@@ -982,22 +1036,50 @@ mod service {
                     return;
                 }
                 if idle_supported {
-                    // 推送连接出错后重连，不能永久降级为轮询。
-                    if wait_for_change(&mut session).is_err() { break; }
+                    // 到点只是「主动收线」，连接本身还好，继续挂下一次 IDLE；
+                    // 只有提前返回的才是真错误，交给外层重连。
+                    let waiting = std::time::Instant::now();
+                    match wait_for_change(&mut session, IDLE_HOLD) {
+                        Ok(imap::extensions::idle::WaitOutcome::MailboxChanged) => {
+                            log(&format!("{} idle woke: mailbox changed after {}s", account.email, waiting.elapsed().as_secs()));
+                        }
+                        Ok(_) => {}
+                        Err(_) => {
+                            let held = waiting.elapsed();
+                            if held + Duration::from_secs(2) < IDLE_HOLD {
+                                log(&format!("{} idle broken after {}s", account.email, held.as_secs()));
+                                break;
+                            }
+                        }
+                    }
                 } else {
-                    if sleep_stop(&stop, interval.load(Ordering::Relaxed)) {
-                        let _ = session.logout();
-                        return;
+                    // 163/126 不宣告 IDLE，而且空闲约两分钟就掐断连接：
+                    // 旧逻辑睡满整个间隔（默认 120 秒）再 NOOP，醒来时连接已被
+                    // 服务器杀掉，fetch 永远没机会执行，邮件就一直收不到。
+                    // 改成最长 45 秒一步的 NOOP 保活，到用户设置的间隔才拉取。
+                    let interval_secs = (interval.load(Ordering::Relaxed) as u64).max(30);
+                    let deadline = std::time::Instant::now() + Duration::from_secs(interval_secs);
+                    let mut alive = true;
+                    while std::time::Instant::now() < deadline {
+                        let remaining = deadline.saturating_duration_since(std::time::Instant::now()).as_secs().max(1);
+                        if sleep_stop(&stop, 45.min(remaining)) {
+                            let _ = session.logout();
+                            return;
+                        }
+                        if session.noop().is_err() {
+                            log(&format!("{} noop failed on poll", account.email));
+                            alive = false;
+                            break;
+                        }
                     }
-                    if session.noop().is_err() {
-                        break;
-                    }
+                    if !alive { break; }
                 }
                 if stop.load(Ordering::Relaxed) {
                     let _ = session.logout();
                     return;
                 }
                 if fetch_new(&mut session, &account, &mut last_uid, &ev).is_err() {
+                    log(&format!("{} fetch failed, reconnecting", account.email));
                     break;
                 }
             }
