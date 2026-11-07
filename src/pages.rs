@@ -934,6 +934,7 @@ impl App {
     pub(crate) fn mail_detail(&mut self, c: &Card, raw: &mail::Item, cmds: &mut Vec<Cmd>) {
         let hidden=self.mail_code_hidden(raw);
         let display=self.display_mail(raw);let item=&display;
+        let body=self.mail_body_lines(item);
         c.fill(36.0, 36.0, 347.0, 188.0, 11.0, theme::CARD);
         let back = c.hit(330.0, 42.0, 44.0, 14.0, ("mail-back", item.uid));
         let bh = c.hover_t(&back).0;
@@ -965,8 +966,8 @@ impl App {
         content.style_mut().spacing.scroll.floating=false;
         content.spacing_mut().scroll.bar_width=4.0*c.s;
         egui::ScrollArea::vertical().id_salt(("mail-body",&item.account,item.uid)).max_height(90.0*c.s).auto_shrink([false,false]).show(&mut content,|ui|{
-            if !item.summary.is_empty() {
-                ui.add(egui::Label::new(egui::RichText::new(item.summary.as_ref()).font(c.font(12.0,W::Regular)).color(Color32::from_gray(220))).wrap());
+            if !body.is_empty() {
+                crate::mail_reader::body_ui(ui,body.as_ref(),11.5);
             }else if item.links.is_empty(){
                 ui.label(egui::RichText::new("（这封邮件没有正文）").font(c.font(12.0,W::Regular)).color(theme::DIM));
             }

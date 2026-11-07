@@ -257,6 +257,9 @@ pub struct Item {
     pub received_unix: Option<i64>,
     /// 完整纯文字正文，保留分段，仅保存在内存中。
     pub summary: std::sync::Arc<str>,
+    /// HTML 原文（无 HTML 版本时为空）。排版层据此还原标题、列表、引用等结构；
+    /// `summary` 只作为纯文本邮件的兜底，两者都只在内存中保存。
+    pub html: std::sync::Arc<str>,
     pub links: Vec<Link>,
     /// 会议邀请（来自 .ics / text/calendar），没有就是 `None`。
     pub meeting: Option<Meeting>,
@@ -412,12 +415,12 @@ pub fn parse_message(raw: &[u8]) -> Parsed {
     Parsed { from, subject, text: plain, html, calendar, emphasized }
 }
 
-/// 优先纯文本，HTML 邮件转成文字；保留完整正文与段落。
+/// 优先纯文本，HTML 邮件转成带结构的文字；保留段落、列表和标题层级。
 pub fn body_of(parsed:&Parsed)->String {
     let body = if !parsed.text.trim().is_empty() {
         parsed.text.clone()
     } else if !parsed.html.trim().is_empty() {
-        otp::html_to_text(&parsed.html)
+        otp::html_to_rich_text(&parsed.html)
     } else {
         String::new()
     };
@@ -1142,6 +1145,22 @@ pub use service::Service;
 
 #[cfg(test)]
 mod tests {
+
+    /// multipart/alternative 邮件必须同时保留 text/plain 与 text/html 原文，
+    /// 否则排版层只能拿到被压平的纯文本。
+    #[test]
+    fn multipart_message_keeps_html_original(){
+        let raw=b"From: Team <team@example.com>\r\nSubject: Weekly\r\n\
+Content-Type: multipart/alternative; boundary=\"b\"\r\n\r\n\
+--b\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nWeekly  Flat text\r\n\
+--b\r\nContent-Type: text/html; charset=utf-8\r\n\r\n<h1>Weekly</h1><ul><li>Flat text</li></ul>\r\n--b--\r\n";
+        let parsed=super::parse_message(raw);
+        assert!(!parsed.text.trim().is_empty(),"text/plain 仍要保留作摘要与兜底");
+        assert!(parsed.html.contains("<h1>"),"HTML 原文必须保留");
+        let lines=crate::mail_format::lines(&parsed.html,&parsed.text);
+        assert_eq!(lines[0].kind,crate::mail_format::Kind::Title,"真实邮件应走 HTML 排版");
+        assert!(lines.iter().any(|l|l.kind==crate::mail_format::Kind::Bullet));
+    }
     #[test]
     fn quality_cancelled_meetings_are_not_active_events() {
         let event="BEGIN:VEVENT\nUID:cancelled\nDTSTART:20261101T060000Z\nSTATUS:CANCELLED\nEND:VEVENT";
@@ -1243,7 +1262,7 @@ mod tests {
         let parsed=parse_message(&raw("长邮件",&text));
         assert_eq!(body_of(&parsed),text);
         let html=parse_message(b"Content-Type: text/html; charset=utf-8\r\n\r\n<p>First paragraph</p><p>Last paragraph</p>");
-        assert_eq!(body_of(&html),"First paragraph\nLast paragraph");
+        assert_eq!(body_of(&html),"First paragraph\n\nLast paragraph");
     }
 
     const ICS: &str = "BEGIN:VCALENDAR\r\n\

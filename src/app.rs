@@ -698,6 +698,8 @@ pub struct App {
     bt_initialized: bool,
     /// v0.5.5：邮件账号、最近邮件与设置表单。
     pub(crate) mail: MailState,
+    /// 邮件正文排版缓存：长邮件几百段，不能每帧重新解析一次。
+    mail_lines_cache: Option<(std::sync::Arc<str>, std::sync::Arc<str>, u32, std::sync::Arc<Vec<crate::mail_format::Line>>)>,
     /// v0.5.6：日历（CalDAV）配置、未来 24 小时事件与设置表单。
     pub(crate) calendar: CalendarState,
     pub(crate) quota: crate::quota_ui::State,
@@ -800,6 +802,7 @@ impl App {
             bt_shown: Vec::new(),
             bt_initialized: false,
             mail: MailState { accounts: mail::load_accounts(), ..Default::default() },
+            mail_lines_cache: None,
             calendar: CalendarState::load(),
             quota: crate::quota_ui::State::load(),
             updates: Default::default(),
@@ -821,6 +824,21 @@ impl App {
         self.mail.privacy.hidden(item,self.t,self.settings.mail_code_hide_seconds)
     }
     pub(crate) fn reveal_mail_code(&mut self,item:&mail::Item){self.mail.privacy.reveal(item,self.t);}
+    /// 同一封邮件、同一段正文只解析一次排版，避免每帧重复切分几百个段落。
+    pub(crate) fn mail_body_lines(&mut self, item: &mail::Item) -> std::sync::Arc<Vec<crate::mail_format::Line>> {
+        // display_mail 每帧只 clone Arc：正文与 HTML 原文的指针都不变就说明是同一封邮件，
+        // 长邮件不必每帧重新哈希几十 KB，更不必重新跑正则解析。
+        let hit = self.mail_lines_cache.as_ref().is_some_and(|(summary, html, uid, _)|
+            *uid == item.uid
+            && std::sync::Arc::ptr_eq(summary, &item.summary)
+            && std::sync::Arc::ptr_eq(html, &item.html));
+        if !hit {
+            self.mail_lines_cache = Some((item.summary.clone(), item.html.clone(), item.uid,
+                std::sync::Arc::new(crate::mail_format::item_lines(item))));
+        }
+        self.mail_lines_cache.as_ref().unwrap().3.clone()
+    }
+
     pub(crate) fn display_mail(&self,item:&mail::Item)->mail::Item {
         let mut safe=item.clone();
         if self.mail_code_hidden(item) {
@@ -828,6 +846,10 @@ impl App {
                 safe.subject=crate::mail_privacy::mask(&safe.subject,code);
                 safe.from=crate::mail_privacy::mask(&safe.from,code);
                 safe.summary=self.mail.privacy.masked_body(item);
+                // HTML 原文里可能还有未遮蔽的验证码，隐藏时必须一起丢弃。
+                // 用共享的空 Arc，让排版缓存对隐藏邮件也能按指针命中，不必每帧重解析。
+                static EMPTY: std::sync::OnceLock<std::sync::Arc<str>> = std::sync::OnceLock::new();
+                safe.html=EMPTY.get_or_init(||std::sync::Arc::from("")).clone();
                 safe.links.clear(); // Avoid tooltip/URL/copy leaks while hidden.
                 if let Some(event)=&mut safe.meeting {event.title=crate::mail_privacy::mask(&event.title,code);}
                 safe.code=None;
@@ -1115,6 +1137,7 @@ impl App {
                 time: (*time).into(),
                 code: if with_code { (*code).map(str::to_string) } else { None },
                 summary: (*summary).into(),
+                html: String::new().into(),
                 links: Vec::new(),
                 meeting: meeting.as_ref().map(|(start, at)| mail::Meeting { all_day:false, end:None, title: "周五方案评审".into(), start: *start, at: at.clone(), uid: "demo-ics-1".into() }),
                 uid: 900 - i as u32,

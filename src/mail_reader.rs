@@ -1,12 +1,78 @@
-//! 邮件全文阅读窗口：完整文字、收件账号和网页链接。
+//! 邮件全文阅读窗口：完整正文、收件账号和网页链接。
 use crate::app::{App,Cmd};
+use crate::mail_format::{self,Kind};
 use eframe::egui::{self,Color32};
+
+/// `**...**` 内的片段用粗体（HTML 的 strong/b），其余常规字重。
+/// 没有标记时走普通 Label，保持原有换行与字形。
+fn rich_label(ui:&mut egui::Ui,text:&str,size:f32,color:Color32,strong:bool){
+    if !text.contains("**") {
+        let mut label=egui::RichText::new(text.to_owned()).size(size).color(color);
+        if strong{label=label.strong();}
+        ui.add(egui::Label::new(label).wrap());
+        return;
+    }
+    let mut job=egui::text::LayoutJob::default();
+    job.wrap.max_width=ui.available_width();
+    for (index,part) in text.split("**").enumerate(){
+        if part.is_empty(){continue;}
+        let bold=strong||index%2==1;
+        job.append(part,0.0,egui::text::TextFormat{
+            font_id:crate::theme::font(size,if bold{crate::theme::W::Bold}else{crate::theme::W::Regular}),
+            color,..Default::default()
+        });
+    }
+    ui.add(egui::Label::new(job));
+}
+
+/// 正文按块渲染：标题加粗放大、列表带符号缩进、引用变灰、分隔线画细线。
+pub(crate) fn body_ui(ui:&mut egui::Ui,lines:&[mail_format::Line],base:f32){
+    ui.spacing_mut().item_spacing.y=2.0;
+    ui.spacing_mut().indent=16.0;
+    for (index,line) in lines.iter().enumerate() {
+        match line.kind {
+            Kind::Title=>{
+                ui.add_space(6.0);
+                rich_label(ui,&line.text,base+4.0,Color32::WHITE,true);
+            },
+            Kind::Heading=>{
+                ui.add_space(8.0);
+                rich_label(ui,&line.text,base+2.0,Color32::from_gray(248),true);
+            },
+            Kind::Body=>rich_label(ui,&line.text,base,Color32::from_gray(232),false),
+            Kind::Bullet=>{
+                ui.indent(("mail-bullet",index),|ui|{
+                    rich_label(ui,&format!("•  {}",line.text),base,Color32::from_gray(232),false);
+                });
+            },
+            Kind::Numbered=>{
+                // 序号已经在正文里，缩进对齐即可。
+                ui.indent(("mail-numbered",index),|ui|{
+                    rich_label(ui,&line.text,base,Color32::from_gray(232),false);
+                });
+            },
+            Kind::Quote=>{
+                ui.add_space(3.0);
+                ui.indent(("mail-quote",index),|ui|{
+                    rich_label(ui,&format!("│  {}",line.text),base-0.5,Color32::from_gray(176),false);
+                });
+            },
+            Kind::Gap=>ui.add_space(7.0),
+            Kind::Divider=>{
+                ui.add_space(5.0);
+                ui.separator();
+                ui.add_space(5.0);
+            },
+        }
+    }
+}
 
 impl App {
     pub fn mail_reader_ui(&mut self,ctx:&egui::Context) {
         let Some(raw)=self.mail.reading.clone() else{return};
         let hidden=self.mail_code_hidden(&raw);
         let item=self.display_mail(&raw);
+        let body=self.mail_body_lines(&item);
         let mut reveal=false;
         let focus=std::mem::take(&mut self.mail.reader_focus);
         let (mut close,mut link)=(false,None);
@@ -39,7 +105,11 @@ impl App {
                 ui.label(egui::RichText::new("鼠标滚轮或拖动右侧滚动条查看全文").size(11.5).color(Color32::from_gray(160)));
                 ui.style_mut().spacing.scroll.floating=false;
                 egui::ScrollArea::vertical().id_salt(("mail-reader-body",&item.account,item.uid)).auto_shrink([false,false]).show(ui,|ui|{
-                    ui.add(egui::Label::new(egui::RichText::new(if item.summary.is_empty(){"（这封邮件没有正文）"}else{item.summary.as_ref()}).size(14.0).color(Color32::from_gray(235))).selectable(true).wrap());
+                    if body.is_empty(){
+                        ui.label(egui::RichText::new("（这封邮件没有正文）").size(14.0).color(Color32::from_gray(200)));
+                    }else{
+                        body_ui(ui,body.as_ref(),14.0);
+                    }
                     if !item.links.is_empty(){
                         ui.add_space(12.0);ui.separator();ui.label(egui::RichText::new("邮件中的链接").strong());
                         for target in &item.links{

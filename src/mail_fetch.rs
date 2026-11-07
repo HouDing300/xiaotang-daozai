@@ -24,7 +24,7 @@ fn make_item(parsed:Parsed,fetch:&imap::types::Fetch,account:&Account)->Item{
         from:if parsed.from.is_empty(){account.email.clone()}else{parsed.from.clone()},
         subject:if parsed.subject.is_empty(){"（无主题）".into()}else{parsed.subject.clone()},
         time:fetch.internal_date().map(|d|d.with_timezone(&chrono::Local).format("%m-%d %H:%M").to_string()).unwrap_or_default(),
-        code:code_of(&parsed),summary:body_of(&parsed).into(),links:links_of(&parsed),meeting:meeting_of(&parsed.calendar),uid:fetch.uid.unwrap_or(0)}
+        code:code_of(&parsed),summary:body_of(&parsed).into(),html:parsed.html.clone().into(),links:links_of(&parsed),meeting:meeting_of(&parsed.calendar),uid:fetch.uid.unwrap_or(0)}
 }
 
 /// 服务器明确拒绝了这条命令（NO / BAD）：连接仍然同步，可以换一种方式读这封信。
