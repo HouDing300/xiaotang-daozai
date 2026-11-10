@@ -4,7 +4,7 @@ use serde_json::Value;
 use std::{io::Read,sync::mpsc,time::Duration};
 #[derive(Clone,Debug)]
 #[derive(serde::Serialize,serde::Deserialize)]
-pub struct Credits {pub remaining:f64,pub packages:Vec<(String,f64)>}
+pub struct Credits {pub remaining:f64,pub packages:Vec<(String,f64)>,#[serde(default)] pub unlimited:bool}
 impl Credits {
     pub fn compact(&self)->String{super::deepseek::Balance{currency:"CNY".into(),total:self.remaining,granted:0.0,topped_up:0.0}.compact().trim_start_matches('¥').to_owned()}
     pub fn full(&self)->String{let text=super::deepseek::Balance{currency:"CNY".into(),total:self.remaining,granted:0.0,topped_up:0.0}.full(self.remaining);text.trim_start_matches('¥').trim_end_matches('0').trim_end_matches('.').to_owned()}
@@ -24,12 +24,12 @@ pub fn parse(value:&Value)->Result<Snapshot,String>{
             if let Some(amount)=group["CycleRemainCapacity"].as_f64().or_else(||group["CycleRemainCapacity"].as_str().and_then(|s|s.parse::<f64>().ok())).filter(|n|n.is_finite()&&*n>0.0){packages.push((label.into(),amount));}
         }
     }else{packages.clear();}
-    Ok(Snapshot{plan:data["SubscriptionPackageName"].as_str().unwrap_or_default().into(),credits:Some(Credits{remaining,packages}),at:chrono::Utc::now().timestamp(),..Default::default()})
+    Ok(Snapshot{plan:data["SubscriptionPackageName"].as_str().unwrap_or_default().into(),credits:Some(Credits{remaining,packages,unlimited:false}),at:chrono::Utc::now().timestamp(),..Default::default()})
 }
 fn valid_origin(origin:&str)->bool{matches!(origin,"https://www.codebuddy.cn"|"https://www.workbuddy.cn")}
 fn slot(uid:&str)->String{ring::digest::digest(&ring::digest::SHA256,uid.as_bytes()).as_ref().iter().map(|b|format!("{b:02x}")).collect()}
 #[derive(serde::Serialize,serde::Deserialize)]
-struct Session { origin:String, ua:String, cookie:String, #[serde(default)] auth:Option<Auth> }
+struct Session { origin:String, ua:String, cookie:String, #[serde(default)] auth:Option<Auth>, #[serde(default)] enterprise_id:Option<String> }
 #[derive(serde::Serialize,serde::Deserialize)]
 #[serde(rename_all="camelCase")]
 struct Auth{
@@ -53,6 +53,32 @@ pub fn forget(account:&Account){
     if let Some(path)=account.slot.as_deref().and_then(|id|session_path(id).ok()){let _=std::fs::remove_file(path);}
 }
 const SUMMARY:&str="/billing/meter/get-user-resource-summary";
+// 企业旗舰版／专享版成员额度：不在个人资源包体系里，credit 是已用、limitNum 是周期限量（-1 不限量）。
+const ENTERPRISE_SUMMARY:&str="/v2/billing/meter/get-enterprise-user-usage";
+const ENTERPRISE_ORIGIN:&str="https://www.workbuddy.cn";
+fn number(v:&Value,names:&[&str])->Option<f64>{
+    names.iter().find_map(|name|v[*name].as_f64().or_else(||v[*name].as_str()?.parse().ok())).filter(|n|n.is_finite())
+}
+fn cycle_reset(v:&Value)->Option<i64>{
+    let naive=chrono::NaiveDateTime::parse_from_str(v.as_str()?,"%Y-%m-%d %H:%M:%S").ok()?;
+    use chrono::TimeZone;
+    chrono::Local.from_local_datetime(&naive).single().map(|d|d.timestamp())
+}
+pub fn parse_enterprise(value:&Value)->Result<Snapshot,String>{
+    if value["code"].as_i64()!=Some(0){return Err("企业额度接口暂未返回结果，请稍后重试".into());}
+    let data=&value["data"];
+    let used=number(data,&["credit","used_num"]).ok_or("企业用量字段无效")?.max(0.0);
+    let limit=number(data,&["limitNum","limit_num"]).ok_or("企业额度字段无效")?;
+    let at=chrono::Utc::now().timestamp();
+    if limit<0.0{
+        return Ok(Snapshot{plan:"企业旗舰版 · 不限量".into(),credits:Some(Credits{remaining:0.0,packages:vec![("不限量".into(),0.0)],unlimited:true}),at,..Default::default()});
+    }
+    let remaining=(limit-used).max(0.0);
+    let percent=if limit>0.0{((remaining/limit)*100.0).clamp(0.0,100.0) as f32}else{100.0};
+    let mut snapshot=Snapshot{plan:"企业旗舰版".into(),credits:Some(Credits{remaining,packages:vec![("周期限量".into(),limit),("已用".into(),used)],unlimited:false}),at,..Default::default()};
+    snapshot.windows.push(super::Window{label:"本周期".into(),seconds:None,remaining:percent,reset:cycle_reset(&data["cycleResetTime"]).or_else(||cycle_reset(&data["cycleEndTime"]))});
+    Ok(snapshot)
+}
 enum Failure { Transport, Expired, Message(String) }
 impl Failure {
     fn message(self)->String{match self{Self::Transport=>"暂时无法连接 WorkBuddy 官网".into(),Self::Expired=>"官网登录已过期，请重新连接 WorkBuddy".into(),Self::Message(s)=>s}}
@@ -71,16 +97,41 @@ fn api(agent:&ureq::Agent,session:&Session,path:&str)->Result<Value,Failure>{
     })?;
     serde_json::from_reader(response.into_reader().take(2*1024*1024)).map_err(|_|Failure::Message("WorkBuddy 官网返回了无效数据".into()))
 }
+// 企业额度接口需要 X-User-Id 与 X-Enterprise-Id 同时存在；国内计费域优先 workbuddy.cn，失败再试会话域。
+fn enterprise_api(agent:&ureq::Agent,s:&Session)->Result<Value,Failure>{
+    let auth=s.auth.as_ref().ok_or(Failure::Expired)?;
+    let enterprise=s.enterprise_id.as_deref().filter(|v|!v.is_empty())
+        .ok_or_else(||Failure::Message("缺少企业标识，请重新连接 WorkBuddy".into()))?;
+    let mut last=Failure::Transport;
+    for origin in [ENTERPRISE_ORIGIN,s.origin.as_str()].into_iter().filter(|o|valid_origin(*o)){
+        let url=format!("{origin}{ENTERPRISE_SUMMARY}");
+        let request=agent.post(&url)
+            .set("Authorization",&format!("Bearer {}",auth.access_token))
+            .set("X-User-Id",&auth.uid).set("X-Enterprise-Id",enterprise)
+            .set("X-Domain",&auth.domain).set("X-Client-Platform","web")
+            .set("Accept","application/json").set("Content-Type","application/json");
+        match request.send_string("{}"){
+            Ok(response)=>return serde_json::from_reader(response.into_reader().take(2*1024*1024))
+                .map_err(|_|Failure::Message("企业额度接口返回了无效数据".into())),
+            Err(ureq::Error::Status(401|403,_))=>return Err(Failure::Expired),
+            Err(ureq::Error::Status(404|405,_))=>{last=Failure::Message("企业额度接口不可用，请检查账号版本".into());},
+            Err(ureq::Error::Status(code,_))=>{last=Failure::Message(format!("WorkBuddy 官网返回 {code}，请稍后重试"));},
+            Err(_)=>{last=Failure::Transport;},
+        }
+    }
+    Err(last)
+}
 fn verified(agent:&ureq::Agent,s:&Session,id:&str)->Result<Snapshot,Failure>{
     if let Some(auth)=&s.auth{
         if slot(&auth.uid)!=id{return Err(Failure::Message("WorkBuddy 授权账号不匹配".into()));}
+        if s.enterprise_id.as_deref().is_some_and(|v|!v.is_empty()){
+            return parse_enterprise(&enterprise_api(agent,s)?).map_err(Failure::Message);
+        }
         return parse(&api(agent,s,SUMMARY)?).map_err(Failure::Message);
     }
     let profile=api(agent,s,"/console/account")?;
     let uid=profile.pointer("/data/uid").and_then(Value::as_str).ok_or_else(||Failure::Message("官网未返回 WorkBuddy 账号信息".into()))?;
-    if slot(uid)!=id || profile.pointer("/data/isCurrentOneIdEnterprise")==Some(&Value::Bool(true)){
-        return Err(Failure::Message("官网账号与已绑定的个人账号不一致".into()));
-    }
+    if slot(uid)!=id{return Err(Failure::Message("官网账号与已绑定账号不一致".into()));}
     parse(&api(agent,s,SUMMARY)?).map_err(Failure::Message)
 }
 fn query(agent:&ureq::Agent,s:&Session,id:&str)->Result<Snapshot,Failure>{
@@ -108,21 +159,27 @@ fn with_transport_retry<T>(agent:&ureq::Agent,origin:&str,request:impl Fn(&ureq:
 // 只读取客户端当前会话；未知加密格式交给独立官网登录，不改写客户端文件。
 fn local_snapshot(agent:&ureq::Agent,expected:Option<&str>)->Result<(String,Snapshot),String>{
     let base=std::env::var_os("LOCALAPPDATA").ok_or("未找到本机用户目录")?;
-    let path=std::path::PathBuf::from(base).join("CodeBuddyExtension/Data/Public/auth/workbuddy-desktop-ai.info");
+    let dir=std::path::PathBuf::from(base).join("CodeBuddyExtension/Data/Public/auth");
+    let path=["workbuddy-desktop-ai.info","workbuddy-desktop.info"].iter().map(|name|dir.join(name))
+        .find(|p|p.is_file()).ok_or("未找到 WorkBuddy 客户端登录")?;
     if path.with_extension("info.logged-out").exists(){return Err("WorkBuddy 客户端已退出登录".into());}
     let raw=std::fs::read(&path).map_err(|_|"未找到 WorkBuddy 客户端登录")?;
     let root:Value=serde_json::from_slice(&raw).map_err(|_|"无法读取 WorkBuddy 客户端登录")?;
     let uid=root.pointer("/account/uid").and_then(Value::as_str).ok_or("客户端尚未登录")?;
     let id=slot(uid);
     if expected.is_some_and(|s|s!=id){return Err("客户端当前账号与已绑定账号不同".into());}
-    if root.pointer("/account/isCurrentOneIdEnterprise")==Some(&Value::Bool(true)){return Err("请使用 WorkBuddy 个人账号".into());}
+    let enterprise=root.pointer("/account/enterpriseId").and_then(Value::as_str).filter(|s|!s.is_empty());
     let token=root.pointer("/auth/accessToken").and_then(Value::as_str).filter(|s|!s.is_empty()).ok_or("客户端登录已加密，请通过官网连接")?;
     let domain=root.pointer("/auth/domain").and_then(Value::as_str).unwrap_or_default();
-    let response=agent.post("https://www.codebuddy.cn/billing/meter/get-user-resource-summary")
+    let is_enterprise=enterprise.is_some();
+    let url=if is_enterprise{format!("{ENTERPRISE_ORIGIN}{ENTERPRISE_SUMMARY}")}else{format!("https://www.codebuddy.cn{SUMMARY}")};
+    let mut request=agent.post(&url)
         .set("Authorization",&format!("Bearer {token}")).set("X-User-Id",uid).set("X-Domain",domain)
-        .set("Content-Type","application/json").send_string("{}").map_err(|_|"暂时无法使用客户端登录查询积分")?;
-    let value:Value=serde_json::from_reader(response.into_reader().take(2*1024*1024)).map_err(|_|"客户端积分响应无效")?;
-    Ok((id,parse(&value)?))
+        .set("Content-Type","application/json");
+    if let Some(ent)=enterprise{request=request.set("X-Enterprise-Id",ent);}
+    let response=request.send_string("{}").map_err(|_|"暂时无法使用客户端登录查询额度")?;
+    let value:Value=serde_json::from_reader(response.into_reader().take(2*1024*1024)).map_err(|_|"客户端额度响应无效")?;
+    Ok((id,if is_enterprise{parse_enterprise(&value)?}else{parse(&value)?}))
 }
 fn refresh_auth(agent:&ureq::Agent,session:&Session)->Result<Auth,Failure>{
     let auth=session.auth.as_ref().ok_or(Failure::Expired)?;
@@ -255,5 +312,21 @@ impl Connect {
         let s=parse(&json!({"code":0,"data":{"Packages":[{"PackageCode":"base","CycleRemainCapacity":"1200"},{"PackageCode":"gift","CycleRemainCapacity":80}]}})).unwrap();let c=s.credits.unwrap();assert_eq!(c.remaining,1280.0);assert_eq!(c.compact(),"1.28k");assert_eq!(c.full(),"1,280");
         for v in [json!({"code":0}),json!({"code":401}),json!({"code":0,"data":{"Packages":[{}]}}),json!({"code":0,"data":{"Packages":[{"CycleRemainCapacity":-1}]}})]{assert!(parse(&v).is_err());}
         assert_eq!(parse(&json!({"code":0,"data":{"Packages":[]}})).unwrap().credits.unwrap().remaining,0.0);
+    }
+    #[test]fn enterprise_quota_maps_used_credit_and_cycle_limit(){
+        let v=json!({"code":0,"data":{"credit":812.45,"limitNum":2000,"cycleResetTime":"2026-10-27 00:00:00"}});
+        let s=parse_enterprise(&v).unwrap();let c=s.credits.clone().unwrap();
+        assert_eq!(c.remaining,1187.55);assert!(!c.unlimited);assert_eq!(s.plan,"企业旗舰版");
+        assert_eq!(c.packages[0].1,2000.0);assert_eq!(c.packages[1].1,812.45);
+        assert_eq!(s.windows.len(),1);assert!(s.windows[0].reset.is_some());
+        assert!(c.full().starts_with("1,187"));
+    }
+    #[test]fn enterprise_quota_handles_unlimited_and_snake_case(){
+        let unlimited=json!({"code":0,"data":{"credit":0,"limitNum":-1}});
+        let c=parse_enterprise(&unlimited).unwrap().credits.unwrap();assert!(c.unlimited);assert_eq!(c.remaining,0.0);
+        let snake=json!({"code":0,"data":{"used_num":500,"limit_num":1500}});
+        assert_eq!(parse_enterprise(&snake).unwrap().credits.unwrap().remaining,1000.0);
+        assert!(parse_enterprise(&json!({"code":401,"data":{}})).is_err());
+        assert!(parse_enterprise(&json!({"code":0,"data":{}})).is_err());
     }
 }

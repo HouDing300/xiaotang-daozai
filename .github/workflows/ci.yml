@@ -2,6 +2,7 @@ name: Windows 检查
 on:
   push:
   pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
 jobs:
@@ -28,6 +29,17 @@ jobs:
         run: |
           $compiler = ./scripts/get-nsis.ps1 -Directory $env:RUNNER_TEMP
           ./scripts/package.ps1 -NsisCompiler $compiler
+      - name: 上传 Windows 构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: daozai-enterprise-quota-v0.6.63
+          path: |
+            dist/*.exe
+            dist/*.zip
+            dist/SHA256SUMS.txt
+            target/x86_64-pc-windows-msvc/release/daozai.exe
+          if-no-files-found: error
+          retention-days: 14
   installer:
     runs-on: windows-latest
     steps:

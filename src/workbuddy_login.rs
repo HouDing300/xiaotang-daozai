@@ -62,12 +62,16 @@ pub(super) fn wait_for_login(agent:&ureq::Agent,state:&str,expected:Option<&str>
         if value["code"].as_i64()==Some(11217){continue;}
         let auth:Auth=serde_json::from_value(value["data"].clone()).map_err(|_|"官网未返回有效授权，请重新连接")?;
         if auth.access_token.is_empty(){return Err("官网登录授权为空，请重新连接".into());}
-        let mut session=Session{origin:ORIGIN.into(),ua:String::new(),cookie:String::new(),auth:Some(auth)};
+        let mut session=Session{origin:ORIGIN.into(),ua:String::new(),cookie:String::new(),auth:Some(auth),enterprise_id:None};
         let accounts=super::with_transport_retry(&agent,ORIGIN,|agent|super::api(agent,&session,"/v2/plugin/accounts")).map_err(Failure::message)?;
         let list=accounts.pointer("/data/accounts").and_then(Value::as_array).ok_or("官网未返回账号列表")?;
-        let personal=list.iter().filter(|a|a["enterpriseId"].as_str().unwrap_or_default().is_empty()&&a["isCurrentOneIdEnterprise"]!=true);
-        let account=personal.filter(|a|a["uid"].as_str().is_some_and(|uid|expected.is_none_or(|id|slot(uid)==id))).next()
-            .ok_or("请在官网登录原来绑定的个人账号后重试")?;
+        // 个人账号优先；企业旗舰版／专享版账号同样接受，额度改走企业用量接口。
+        let matching=|a:&Value|a["uid"].as_str().is_some_and(|uid|expected.is_none_or(|id|slot(uid)==id));
+        let personal=|a:&Value|a["enterpriseId"].as_str().unwrap_or_default().is_empty()&&a["isCurrentOneIdEnterprise"]!=true;
+        let account=list.iter().filter(|a|matching(*a)&&personal(*a)).next()
+            .or_else(||list.iter().find(|a|matching(*a)))
+            .ok_or("请在官网登录原来绑定的账号后重试")?;
+        session.enterprise_id=account["enterpriseId"].as_str().filter(|s|!s.is_empty()).map(str::to_owned);
         let id=slot(account["uid"].as_str().ok_or("官网未返回账号标识")?);
         session.auth.as_mut().unwrap().uid=account["uid"].as_str().unwrap().into();
         let snapshot=query(&agent,&session,&id).map_err(Failure::message)?;
