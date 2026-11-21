@@ -95,7 +95,11 @@ const OPEN_H: (f32, f32) = (290.0, 0.74);
 // 收起：临界阻尼，约 0.18 s 干净收回，无回弹。
 const CLOSE: (f32, f32) = (620.0, 1.0);
 const SWELL_K: (f32, f32) = (420.0, 0.8);
-const PAGE_SLIDE: f32 = 46.0;
+// ---- 翻页转场参数 ---------------------------------------------------------------
+// 幅度与时长已解耦到 Settings（设置 → 外观 → 翻页动画），实时生效；
+// 归一化函数与默认值在 model.rs。这里只保留与旧页淡出相关的固定时长。
+/// 旧页淡出时长（秒）：旧页不平移，只淡出。
+const PAGE_FADE_SECS: f32 = 0.16;
 
 pub struct Options {
     /// 是否联网查歌词（录制/测试时关掉）。
@@ -1662,6 +1666,9 @@ impl App {
     /// 带过渡地切到某页。`dir` > 0 表示内容从右侧进入。
     pub(crate) fn go(&mut self, page: usize, dir: f32) {
         if page == self.page || !self.settings.visible_pages[page] { return; }
+        // 必须在重置 page_t0 之前判断：page_e() = t - page_t0，重置后恒为 0，
+        // 原写法让每次切页都误判为「连点」，保留旧位移 30% 且不清速度。
+        let continuing = self.page_e() < 0.4;
         self.music_volume_open=false;
         self.subpage=None;
         // 连点：上一段过渡还没结束时，以当前页为起点重新开始，位移速度保留。
@@ -1670,7 +1677,16 @@ impl App {
         if page==CALENDAR_PAGE {self.request_calendar_month(false);}
         self.page_dir = dir;
         self.page_t0 = self.t;
-        self.slide.pos = dir * PAGE_SLIDE + if self.page_e() < 0.4 { self.slide.pos * 0.3 } else { 0.0 };
+        if self.settings.page_turn_mode == model::PAGE_TURN_MODE_SPRING {
+            // 弹簧档（官方 v0.6.66 原样，默认）：保留官方的位移/速度语义，
+            // 包括重置 page_t0 后 page_e() 恒为 0 的连点行为，行为与官方逐位一致。
+            self.slide.pos = dir * 46.0 + if self.page_e() < 0.4 { self.slide.pos * 0.3 } else { 0.0 };
+        } else {
+            // 平滑档：位移改由 page_e() 墙钟时间驱动（见 panel_body），
+            // 不用弹簧，单调收敛不回弹；连点顺序 bug 也已修正。
+            self.slide.pos = if continuing { dir * self.settings.page_turn_dist as f32 + self.slide.pos * 0.3 } else { 0.0 };
+            if !continuing { self.slide.vel = 0.0; }
+        }
         self.slide.target = 0.0;
         self.dots_target();
         self.cancel_edit();
@@ -3067,22 +3083,45 @@ impl App {
             self.page_settings(c);self.nav(c);return false;
         }
         let e = self.page_e();
-        let in_tx = e < 0.55 && self.page_from != self.page;
+        let spring = self.settings.page_turn_mode == model::PAGE_TURN_MODE_SPRING;
+        // 弹簧档窗口固定 0.55s（官方值）；平滑档随时间档位自适应。
+        let turn_secs = self.settings.page_turn_secs();
+        let turn_window = if spring { 0.55 } else { self.settings.page_turn_window() };
+        let in_tx = e < turn_window && self.page_from != self.page;
         if in_tx {
-            // 旧页：原地向反方向轻移并快速淡出；新页：弹簧滑入 + 稍晚淡入
-            let old_a = 1.0 - smoothstep(0.0, 0.16, e);
-            let new_a = smoothstep(0.03, 0.28, e);
-            let old_dx = -self.page_dir * 18.0 * anim::ease_out_cubic(e / 0.3);
-            if old_a > 0.0 {
-                let oc = c.faded(old_a).ghost();
-                self.page_title(self.page_from, &oc);
-                self.render_page(self.page_from, &oc.shifted(old_dx, 0.0), env, &mut Vec::new());
+            if spring {
+                // 弹簧档：官方 v0.6.66 原样——旧页反向位移 18px/0.3s，新页用 slide 弹簧位移，
+                // 淡入 smoothstep(0.03,0.28)。保留原样，动作与官方一致。
+                let old_a = 1.0 - smoothstep(0.0, 0.16, e);
+                let new_a = smoothstep(0.03, 0.28, e);
+                let old_dx = -self.page_dir * 18.0 * anim::ease_out_cubic(e / 0.3);
+                if old_a > 0.0 {
+                    let oc = c.faded(old_a).ghost();
+                    self.page_title(self.page_from, &oc);
+                    self.render_page(self.page_from, &oc.shifted(old_dx, 0.0), env, &mut Vec::new());
+                }
+                let nc = c.faded(new_a);
+                self.page_title(self.page, &nc);
+                let nc = nc.shifted(self.slide.pos, 0.0);
+                let nc = if e < 0.12 { nc.ghost() } else { nc };
+                self.render_page(self.page, &nc, env, cmds);
+            } else {
+                // 平滑档：旧页纯淡出（不平移）；新页用 smootherstep 时间驱动滑入：
+                // 起点和终点速度都是 0，位移与淡入共用同一条进度 p，单调收敛不回弹。
+                let old_a = 1.0 - smoothstep(0.0, PAGE_FADE_SECS, e);
+                if old_a > 0.0 {
+                    let oc = c.faded(old_a).ghost();
+                    self.page_title(self.page_from, &oc);
+                    self.render_page(self.page_from, &oc, env, &mut Vec::new());
+                }
+                let p = anim::smootherstep(e / turn_secs);
+                let nc = c.faded(p);
+                self.page_title(self.page, &nc);
+                let enter_dx = self.page_dir * self.settings.page_turn_dist as f32 * (1.0 - p);
+                let nc = nc.shifted(enter_dx, 0.0);
+                let nc = if e < 0.12 { nc.ghost() } else { nc };
+                self.render_page(self.page, &nc, env, cmds);
             }
-            let nc = c.faded(new_a);
-            self.page_title(self.page, &nc);
-            let nc = nc.shifted(self.slide.pos, 0.0);
-            let nc = if e < 0.12 { nc.ghost() } else { nc };
-            self.render_page(self.page, &nc, env, cmds);
         } else {
             self.page_title(self.page, c);
             self.render_page(self.page, c, env, cmds);

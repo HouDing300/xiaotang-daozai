@@ -1148,6 +1148,21 @@ fn island_size_slider(ui:&mut egui::Ui,value:&mut u32)->egui::Response {
     response
 }
 
+/// 翻页幅度滑块：拖动时用 draft 暂存，松手才提交，避免拖动中每帧重绘动画。
+fn page_turn_dist_slider(ui:&mut egui::Ui,value:&mut u32)->egui::Response {
+    let id=ui.make_persistent_id("page-turn-dist-draft");
+    let mut draft=ui.data(|d|d.get_temp::<u32>(id)).unwrap_or(*value);
+    let response=ui.add(egui::Slider::new(&mut draft,0..=crate::model::PAGE_TURN_DIST_MAX)
+        .step_by(crate::model::PAGE_TURN_DIST_STEP as f64).suffix("px"));
+    if ui.input(|i|i.pointer.primary_down()) {
+        if response.changed(){ui.data_mut(|d|d.insert_temp(id,draft));}
+    }else{
+        *value=crate::model::page_turn_dist_value(draft);
+        ui.data_mut(|d|d.remove::<u32>(id));
+    }
+    response
+}
+
 pub(crate) fn settings_hint(ui:&mut egui::Ui,text:&str){
     let ctx=&ui.ctx().clone();
     ui.add(egui::Label::new(egui::RichText::new(text).size(11.5).color(settings_color(ctx,Color32::from_gray(170),Color32::from_gray(92)))).wrap());
@@ -1690,6 +1705,28 @@ impl App {
                             if pet!=self.settings.pet {self.set_pet(pet);}
                             settings_advanced(ui,"settings-appearance-advanced",|ui|{
                                 setting_row(ui,"OLED 像素偏移","防止 OLED 屏幕烧屏：收起静止时让岛体缓慢移动几个像素，不改动你保存的位置",&mut self.settings.oled_shift);
+                            });
+                        });
+                        settings_label(ui,"翻页动画");
+                        settings_card(ui,|ui|{
+                            use crate::model as model;
+                            let modes:[(u8,&str);2]=[(model::PAGE_TURN_MODE_SPRING,"弹簧"),(model::PAGE_TURN_MODE_SMOOTH,"平滑")];
+                            settings_control_row_right(ui,"转场模式",|ui|{settings_segmented(ui,&mut self.settings.page_turn_mode,&modes,56.0);});
+                            ui.separator();
+                            ui.add_enabled_ui(!self.settings.page_turn_spring(),|ui|{
+                                settings_control_row(ui,"滑入幅度",56.0,|ui|{
+                                    ui.horizontal_wrapped(|ui|{
+                                        ui.spacing_mut().slider_width=(ui.available_width()-110.0).clamp(64.0,200.0);
+                                        page_turn_dist_slider(ui,&mut self.settings.page_turn_dist);
+                                        if ui.add_enabled(self.settings.page_turn_dist!=model::PAGE_TURN_DIST_DEFAULT,egui::Button::new("恢复默认")).clicked(){self.settings.page_turn_dist=model::PAGE_TURN_DIST_DEFAULT;}
+                                    }).response
+                                });
+                                let d=crate::model::page_turn_dist_value(self.settings.page_turn_dist);
+                                settings_hint(ui,&if d==0 {"纯淡入淡出，内容不横向移动。".to_string()}else{format!("新页从箭头方向滑入 {d}px 后平滑停住；调成 0 就是不移动的淡入淡出。")});
+                                ui.separator();
+                                let speeds:[(u32,&str);3]=[(model::PAGE_TURN_MS_FAST,"快"),(model::PAGE_TURN_MS_NORMAL,"标准"),(model::PAGE_TURN_MS_SLOW,"慢")];
+                                settings_control_row_right(ui,"时长",|ui|{settings_segmented(ui,&mut self.settings.page_turn_ms,&speeds,56.0);});
+                                settings_hint(ui,&format!("快 0.24s ／ 标准 0.34s ／ 慢 0.46s，当前 {:.2}s。立即生效，无需重启。",self.settings.page_turn_secs()));
                             });
                         });
                     }

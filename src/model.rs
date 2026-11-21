@@ -196,6 +196,24 @@ pub fn island_size_value(value: u32) -> u32 {
     (value + ISLAND_SIZE_STEP / 2) / ISLAND_SIZE_STEP * ISLAND_SIZE_STEP
 }
 
+// ---- 翻页转场：幅度与时长由设置决定，默认即实测最顺手的一组 -------
+/// 翻页动画驱动模式：弹簧 = 官方 v0.6.66 原样（默认），平滑 = 单调缓动版。
+pub const PAGE_TURN_MODE_SPRING: u8 = 0;
+pub const PAGE_TURN_MODE_SMOOTH: u8 = 1;
+/// 新页入场横向位移上限（px）；0 = 纯交叉淡入淡出，不平移。
+pub const PAGE_TURN_DIST_MAX: u32 = 40;
+pub const PAGE_TURN_DIST_STEP: u32 = 2;
+pub const PAGE_TURN_DIST_DEFAULT: u32 = 26;
+/// 转场时长档位（毫秒）：快 / 标准 / 慢。标准 = 之前实测满意的 0.34s。
+pub const PAGE_TURN_MS_FAST: u32 = 240;
+pub const PAGE_TURN_MS_NORMAL: u32 = 340;
+pub const PAGE_TURN_MS_SLOW: u32 = 460;
+
+pub fn page_turn_dist_value(value: u32) -> u32 {
+    let value = value.min(PAGE_TURN_DIST_MAX);
+    (value + PAGE_TURN_DIST_STEP / 2) / PAGE_TURN_DIST_STEP * PAGE_TURN_DIST_STEP
+}
+
 #[derive(Clone, Debug)]
 pub struct Settings {
     pub display_id: String,
@@ -281,6 +299,13 @@ pub struct Settings {
     pub weather_position: Option<crate::weather::Position>,
     /// 已保存、可在岛上下拉切换的城市（不含自动定位），最多 `weather::MAX_CITIES` 个。
     pub weather_saved: Vec<crate::weather::Position>,
+    /// 翻页转场模式：0 = 弹簧（官方原样，默认），1 = 平滑（单调缓动）。
+    /// 弹簧模式完全按官方 v0.6.66 的硬编码执行，忽略下面的幅度/时长设置。
+    pub page_turn_mode: u8,
+    /// 平滑模式的参数：新页入场横向位移（px，0 = 纯淡入淡出）与时长（毫秒，档位 240/340/460）。
+    /// 实时生效，无需重启；默认 26px / 340ms 为实测最顺手的一组。
+    pub page_turn_dist: u32,
+    pub page_turn_ms: u32,
     /// 兼容渲染：用 Direct3D 12 代替 OpenGL（部分显卡的 OpenGL 驱动会崩溃或画面错乱）。重启后生效。
     pub render_compat: bool,
     /// 自动切换到兼容渲染的原因；手动开启时为空。
@@ -289,7 +314,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, oled_shift: false, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 9], page_order: [0,1,2,3,4,5,6,7,8], show_clock: true, show_battery: true, show_weather: true, clock_12h: false, clock_period: 0, clock_seconds: false, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wecom_notifications:false, feishu_notifications:false, dingtalk_notifications:false, wechat_tray_open:false, qq_only:false, notification_preview:false, notifications: true, system_notify: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, avoid_top_bar: true, top_bar_on_top: false, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, sit_remind: true, sit_minutes: 60, lunch_rest: true, lunch_start: 720, lunch_end: 810, mail_enabled: true, mail_sync_operations:false, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true, weather_city: String::new(), weather_position: None, weather_saved: Vec::new(), render_compat: false, render_compat_reason: String::new() }
+        Self { display_id: String::new(), skin: Skin::Classic, island_shape: IslandShape::Notch, glass_blur: true, island_size: 100, island_offset: 0, oled_shift: false, dock: Dock::Top, settings_theme: Default::default(), pet: true, minimal: false, browser_minimal: false, avoid_browsers: true, avoid_apps: Vec::new(), visible_pages: [true; 9], page_order: [0,1,2,3,4,5,6,7,8], show_clock: true, show_battery: true, show_weather: true, clock_12h: false, clock_period: 0, clock_seconds: false, resident_order: Vec::new(), system_hud: true, bluetooth_notifications: true, read_notifications:false, wechat_notifications:false, wecom_notifications:false, feishu_notifications:false, dingtalk_notifications:false, wechat_tray_open:false, qq_only:false, notification_preview:false, notifications: true, system_notify: true, sound: false, lyrics_enabled:true, island_lyrics:false, lyric_delay_ms:-350, hide_fullscreen: true, avoid_top_bar: true, top_bar_on_top: false, focus_minutes: 25, rest_minutes: 5, water_minutes: 45, serving_ml: 250, water_start: 9, water_end: 22, sit_remind: true, sit_minutes: 60, lunch_rest: true, lunch_start: 720, lunch_end: 810, mail_enabled: true, mail_sync_operations:false, mail_code: true, mail_code_hide_seconds:60, mail_interval: 120, mail_ics: 15, ignored_mail_events: Vec::new(), calendar_prompt: true, calendar_auto_sync: true, clipboard_history: true, weather_city: String::new(), weather_position: None, weather_saved: Vec::new(), page_turn_mode: PAGE_TURN_MODE_SPRING, page_turn_dist: PAGE_TURN_DIST_DEFAULT, page_turn_ms: PAGE_TURN_MS_NORMAL, render_compat: false, render_compat_reason: String::new() }
     }
 }
 
@@ -304,6 +329,20 @@ impl Settings {
     /// 水平位置，-1..=1。
     pub fn island_offset_ratio(&self) -> f32 {
         self.island_offset.clamp(-ISLAND_OFFSET_MAX, ISLAND_OFFSET_MAX) as f32 / ISLAND_OFFSET_MAX as f32
+    }
+
+    /// 是否弹簧驱动（官方原样）。
+    pub fn page_turn_spring(&self) -> bool { self.page_turn_mode == PAGE_TURN_MODE_SPRING }
+
+    /// 翻页转场时长（秒）。
+    pub fn page_turn_secs(&self) -> f32 {
+        self.page_turn_ms as f32 / 1000.0
+    }
+
+    /// 翻页动画的判定窗口（秒）：须严格大于入场时长，留 0.21s 覆盖旧页淡出与收尾。
+    /// 默认档 340ms → 0.55s，与第一层解耦前的固定值一致。
+    pub fn page_turn_window(&self) -> f32 {
+        self.page_turn_secs() + 0.21
     }
 
     pub fn clock_text(&self, clock: &str) -> String {
@@ -413,6 +452,13 @@ impl Settings {
                 "weather_city" => s.weather_city = v.trim().to_string(),
                 "weather_position" => s.weather_position=serde_json::from_str::<Option<crate::weather::Position>>(&v).ok().flatten().filter(|p|p.valid()),
                 "weather_saved" => s.weather_saved=serde_json::from_str::<Vec<crate::weather::Position>>(&v).unwrap_or_default().into_iter().filter(|p|p.valid()).collect(),
+                "page_turn_mode" => s.page_turn_mode = if v == "1" { PAGE_TURN_MODE_SMOOTH } else { PAGE_TURN_MODE_SPRING },
+                "page_turn_dist" => s.page_turn_dist = page_turn_dist_value(v.parse::<u32>().unwrap_or(PAGE_TURN_DIST_DEFAULT)),
+                "page_turn_ms" => s.page_turn_ms = match v.parse::<u32>().unwrap_or(PAGE_TURN_MS_NORMAL) {
+                    PAGE_TURN_MS_FAST => PAGE_TURN_MS_FAST,
+                    PAGE_TURN_MS_SLOW => PAGE_TURN_MS_SLOW,
+                    _ => PAGE_TURN_MS_NORMAL,
+                },
                 "render_compat" => s.render_compat = v == "1",
                 "render_compat_reason" => s.render_compat_reason = v.chars().filter(|c| !c.is_control()).take(200).collect(),
                 _ => {}
@@ -497,6 +543,9 @@ impl Settings {
                 ("weather_city".into(), self.weather_city.clone()),
                 ("weather_position".into(), serde_json::to_string(&self.weather_position).unwrap()),
                 ("weather_saved".into(), serde_json::to_string(&self.weather_saved).unwrap()),
+                ("page_turn_mode".into(), self.page_turn_mode.to_string()),
+                ("page_turn_dist".into(), page_turn_dist_value(self.page_turn_dist).to_string()),
+                ("page_turn_ms".into(), self.page_turn_ms.to_string()),
                 ("render_compat".into(), (self.render_compat as u8).to_string()),
                 ("render_compat_reason".into(), self.render_compat_reason.clone()),
             ],
@@ -886,6 +935,28 @@ mod tests {
         assert_eq!((s.skin, s.glass_blur, s.island_scale(), s.island_offset_ratio()), (Skin::Classic, true, 1.0, 0.0));
         s.island_size = 125; s.island_offset = -250;
         assert_eq!((s.island_scale(), s.island_offset_ratio()), (1.25, -1.0));
+    }
+
+    #[test]
+    fn page_turn_settings_normalize_and_default() {
+        // 默认值 = 实测最顺手的一组，且窗口严格大于时长。
+        let s = Settings::default();
+        assert_eq!(s.page_turn_mode, PAGE_TURN_MODE_SPRING, "默认须与官方一致：弹簧驱动");
+        assert_eq!((s.page_turn_dist, s.page_turn_ms), (PAGE_TURN_DIST_DEFAULT, PAGE_TURN_MS_NORMAL));
+        assert!((s.page_turn_secs() - 0.34).abs() < 1e-6);
+        assert!((s.page_turn_window() - 0.55).abs() < 1e-6);
+        assert!(s.page_turn_window() > s.page_turn_secs(), "窗口须覆盖整个入场动画");
+        // 幅度归一化：0 保留（纯淡入淡出）、上限截断、步进对齐。
+        assert_eq!(page_turn_dist_value(0), 0);
+        assert_eq!(page_turn_dist_value(26), 26);
+        assert_eq!(page_turn_dist_value(999), PAGE_TURN_DIST_MAX);
+        assert_eq!(page_turn_dist_value(27), 28, "27 四舍五入到最近偶数应为 28");
+        assert_eq!(page_turn_dist_value(25), 26, "25 四舍五入到最近偶数应为 26");
+        // 各档位下窗口都严格大于时长，避免短档位动画被硬截断。
+        for ms in [PAGE_TURN_MS_FAST, PAGE_TURN_MS_NORMAL, PAGE_TURN_MS_SLOW] {
+            let mut t = Settings::default(); t.page_turn_ms = ms;
+            assert!(t.page_turn_window() > t.page_turn_secs());
+        }
     }
 
     #[test]

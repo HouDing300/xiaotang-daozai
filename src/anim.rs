@@ -78,6 +78,13 @@ pub fn ease_out_cubic(t: f32) -> f32 {
     1.0 - u * u * u
 }
 
+/// 五次平滑缓动：两端的一阶、二阶导数都为 0（起步不猛、收尾不顿）。
+/// 适合页面转场这类需要整段平滑的动画；与 smoothstep 一样单调、无过冲。
+pub fn smootherstep(t: f32) -> f32 {
+    let t = clamp01(t);
+    t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+}
+
 pub fn ease_in_out(t: f32) -> f32 {
     let t = clamp01(t);
     if t < 0.5 {
